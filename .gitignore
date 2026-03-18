@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+
+# GIS source data and generated outputs stay local.
+Arcgis shapes y curvas/
+resultados_refinados/
