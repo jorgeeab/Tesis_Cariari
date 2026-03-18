@@ -21,6 +21,7 @@ Salida:
 import os
 import sys
 import math
+import heapq
 import json
 import base64
 import time
@@ -54,6 +55,8 @@ FIELD_POINT_WEIGHT = 3          # peso de los puntos GPS vs curvas de nivel
 MAX_CONTOUR_POINTS = 20_000     # límite de puntos de curvas por rendimiento
 MARGIN_DEG         = 0.003      # margen en grados para el bounding box
 TILE_RETRY         = 3          # reintentos de descarga de tiles
+FLOW_FILL_EPS      = 0.02       # leve incremento para resolver depresiones/planicies
+FLOW_SMOOTH_PASSES = 5          # suavizado de la capa de acumulacion
 
 # URLs WFS – IGN 1:25 000
 WFS_BASE = "https://geos.snitcr.go.cr/be/IGN_25/wfs?"
@@ -1084,6 +1087,187 @@ def prepare_dem_for_threejs(dem, lons, lats, lon_center, lat_center):
     }
 
 
+def fill_sinks_priority_flood(dem, epsilon=FLOW_FILL_EPS):
+    """
+    Rellena depresiones locales para forzar un drenaje continuo hacia el borde.
+    El DEM debe venir orientado como Three.js: norte en la fila 0.
+    """
+    ny, nx = dem.shape
+    if ny == 0 or nx == 0:
+        return dem.astype(np.float64, copy=True)
+
+    filled = dem.astype(np.float64, copy=True)
+    visited = np.zeros((ny, nx), dtype=bool)
+    heap = []
+    neighbors = [
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    ]
+
+    def push_cell(j, i):
+        if visited[j, i]:
+            return
+        visited[j, i] = True
+        heapq.heappush(heap, (filled[j, i], j, i))
+
+    for i in range(nx):
+        push_cell(0, i)
+        push_cell(ny - 1, i)
+    for j in range(1, ny - 1):
+        push_cell(j, 0)
+        push_cell(j, nx - 1)
+
+    while heap:
+        elev, j, i = heapq.heappop(heap)
+        for dj, di in neighbors:
+            nj = j + dj
+            ni = i + di
+            if nj < 0 or nj >= ny or ni < 0 or ni >= nx or visited[nj, ni]:
+                continue
+            visited[nj, ni] = True
+            next_elev = filled[nj, ni]
+            if next_elev <= elev:
+                next_elev = elev + epsilon
+                filled[nj, ni] = next_elev
+            heapq.heappush(heap, (next_elev, nj, ni))
+
+    return filled
+
+
+def smooth_scalar_grid(grid, passes=1):
+    """Suaviza una grilla escalar con un kernel 3x3 ponderado."""
+    out = grid.astype(np.float64, copy=True)
+    for _ in range(max(0, passes)):
+        padded = np.pad(out, 1, mode="edge")
+        out = (
+            padded[:-2, :-2] + 2.0 * padded[:-2, 1:-1] + padded[:-2, 2:]
+            + 2.0 * padded[1:-1, :-2] + 4.0 * padded[1:-1, 1:-1] + 2.0 * padded[1:-1, 2:]
+            + padded[2:, :-2] + 2.0 * padded[2:, 1:-1] + padded[2:, 2:]
+        ) / 16.0
+    return out
+
+
+def build_flow_hydrology(dem, lons, lats, lat_center):
+    """
+    Calcula direccion D8 y acumulacion de flujo, y prepara la carga util
+    alineada con el DEM serializado para Three.js.
+    """
+    dem_view = np.flipud(dem).astype(np.float64)
+    ny, nx = dem_view.shape
+    if nx < 2 or ny < 2:
+        return {
+            "accumulation": [],
+            "arrow_dx": [],
+            "arrow_dz": [],
+            "arrow_strength": [],
+            "max_accumulation": 0,
+            "arrow_count": 0,
+        }
+
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_center))
+    mpd_lat = 110540.0
+    width_m = abs(lons[-1] - lons[0]) * mpd_lon
+    height_m = abs(lats[-1] - lats[0]) * mpd_lat
+    cell_w = width_m / max(nx - 1, 1)
+    cell_h = height_m / max(ny - 1, 1)
+
+    conditioned = fill_sinks_priority_flood(dem_view, epsilon=FLOW_FILL_EPS)
+    flat_index = np.arange(ny * nx, dtype=np.int32).reshape(ny, nx)
+    receiver = np.full((ny, nx), -1, dtype=np.int32)
+    slopes = np.zeros((ny, nx), dtype=np.float32)
+
+    neighbors = []
+    for dj in (-1, 0, 1):
+        for di in (-1, 0, 1):
+            if dj == 0 and di == 0:
+                continue
+            neighbors.append((dj, di, math.hypot(di * cell_w, dj * cell_h)))
+
+    for j in range(ny):
+        for i in range(nx):
+            h = conditioned[j, i]
+            best_slope = 0.0
+            best_idx = -1
+            for dj, di, dist in neighbors:
+                nj = j + dj
+                ni = i + di
+                if nj < 0 or nj >= ny or ni < 0 or ni >= nx:
+                    continue
+                drop = h - conditioned[nj, ni]
+                if drop <= 0.0:
+                    continue
+                slope = drop / dist
+                if slope > best_slope:
+                    best_slope = slope
+                    best_idx = flat_index[nj, ni]
+            receiver[j, i] = best_idx
+            slopes[j, i] = best_slope
+
+    receiver_flat = receiver.ravel()
+    indegree = np.zeros(ny * nx, dtype=np.int32)
+    for dst in receiver_flat:
+        if dst >= 0:
+            indegree[dst] += 1
+
+    accumulation = np.ones(ny * nx, dtype=np.float64)
+    queue = list(np.where(indegree == 0)[0])
+    head = 0
+    while head < len(queue):
+        idx = queue[head]
+        head += 1
+        dst = receiver_flat[idx]
+        if dst < 0:
+            continue
+        accumulation[dst] += accumulation[idx]
+        indegree[dst] -= 1
+        if indegree[dst] == 0:
+            queue.append(int(dst))
+
+    acc_grid = accumulation.reshape(ny, nx)
+    max_acc = float(acc_grid.max())
+    if max_acc > 1.0:
+        acc_norm = np.log1p(acc_grid) / math.log1p(max_acc)
+    else:
+        acc_norm = np.zeros_like(acc_grid)
+
+    acc_overlay = smooth_scalar_grid(acc_norm, passes=FLOW_SMOOTH_PASSES)
+    overlay_min = float(acc_overlay.min())
+    overlay_max = float(acc_overlay.max())
+    if overlay_max > overlay_min:
+        acc_overlay = (acc_overlay - overlay_min) / (overlay_max - overlay_min)
+    else:
+        acc_overlay = np.zeros_like(acc_overlay)
+    acc_overlay = np.power(acc_overlay, 0.92)
+
+    arrow_dx = np.zeros((ny, nx), dtype=np.float32)
+    arrow_dz = np.zeros((ny, nx), dtype=np.float32)
+    valid_arrows = 0
+    for j in range(ny):
+        for i in range(nx):
+            dst = receiver[j, i]
+            if dst < 0 or slopes[j, i] <= 0.0:
+                continue
+            nj, ni = divmod(int(dst), nx)
+            vx = (ni - i) * cell_w
+            vz = (nj - j) * cell_h
+            vec_len = math.hypot(vx, vz)
+            if vec_len <= 1e-9:
+                continue
+            arrow_dx[j, i] = vx / vec_len
+            arrow_dz[j, i] = vz / vec_len
+            valid_arrows += 1
+
+    return {
+        "accumulation": np.round(acc_overlay.ravel(), 4).tolist(),
+        "arrow_dx": np.round(arrow_dx.ravel(), 4).tolist(),
+        "arrow_dz": np.round(arrow_dz.ravel(), 4).tolist(),
+        "arrow_strength": np.round(acc_norm.ravel(), 4).tolist(),
+        "max_accumulation": int(round(max_acc)),
+        "arrow_count": valid_arrows,
+    }
+
+
 def routes_to_threejs(gps_routes, lon_center, lat_center):
     """Convierte rutas GPS a lista de segmentos para Three.js Line."""
     out = []
@@ -1229,13 +1413,14 @@ def download_vendors():
 #  8. GENERACIÓN DEL HTML
 # ─────────────────────────────────────────────────────────────
 
-def make_html(dem_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_zones_2d, streets_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center):
+def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_zones_2d, streets_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center):
     """
     Genera el HTML autocontenido con Three.js.
     - Curvas de nivel: visibles en 3D (sobre la superficie del terreno)
     - Ríos (Cauce.shp): líneas azul-cian
     - Calles OSM: líneas sobre la superficie para apoyar análisis de escorrentía
     - Catastro SNIT: overlay raster transparente sobre el terreno
+    - Hidrologia: acumulacion de flujo por color + flechas de direccion
     - Puntos de desfogue (OSM KML): esferas naranja con etiqueta
     - Zonas verdes (KML): polígonos semitransparentes sobre el terreno
     - Rutas GPS: NO visibles (usadas solo para DEM)
@@ -1257,6 +1442,7 @@ def make_html(dem_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_
     green_json     = json.dumps(green_zones_2d)
     streets_json   = json.dumps(streets_3d)
     curtain_json   = json.dumps(curtain) if curtain else "null"
+    hydrology_json = json.dumps(hydrology_data)
 
     html = f"""<!DOCTYPE html>
 <html lang="es">
@@ -1305,6 +1491,85 @@ def make_html(dem_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_
     font-size:11px;
     line-height:1.6;
   }}
+  #layer-panel {{
+    position:absolute; top:14px; right:14px;
+    width:240px;
+    max-height:calc(100vh - 28px);
+    overflow:auto;
+    background:rgba(10,10,24,0.84);
+    color:#e8f4ff;
+    padding:12px 14px;
+    border-radius:10px;
+    border:1px solid rgba(100,180,255,0.25);
+    backdrop-filter:blur(6px);
+    font-size:12px;
+    line-height:1.5;
+  }}
+  #layer-panel h3 {{ font-size:13px; color:#7ecfff; margin-bottom:6px; }}
+  .layer-subtitle {{
+    margin:10px 0 6px;
+    color:#95d9ff;
+    font-size:10px;
+    text-transform:uppercase;
+    letter-spacing:0.08em;
+  }}
+  .layer-row {{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    margin:4px 0;
+    cursor:pointer;
+  }}
+  .layer-row--stack {{
+    display:block;
+    cursor:default;
+  }}
+  .layer-row input {{ accent-color:#47c6ff; }}
+  .layer-range {{
+    width:100%;
+    margin-top:6px;
+    accent-color:#47c6ff;
+  }}
+  .layer-note {{
+    color:#8ab4cc;
+    font-size:10px;
+  }}
+  .layer-color {{
+    width:100%;
+    height:34px;
+    margin-top:6px;
+    border:none;
+    border-radius:8px;
+    background:transparent;
+    cursor:pointer;
+  }}
+  .layer-split {{
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+    gap:8px;
+    margin:6px 0 4px;
+  }}
+  .layer-field {{
+    display:block;
+  }}
+  .preset-row {{
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+    gap:6px;
+  }}
+  .layer-btn {{
+    background:#13283b;
+    color:#d8efff;
+    border:1px solid rgba(111, 190, 255, 0.25);
+    border-radius:8px;
+    padding:6px 8px;
+    font-size:11px;
+    cursor:pointer;
+  }}
+  .layer-btn:hover {{
+    background:#1a3852;
+    border-color:rgba(111, 190, 255, 0.45);
+  }}
 </style>
 </head>
 <body>
@@ -1318,6 +1583,57 @@ def make_html(dem_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_
   <div class="stat">Elev. máx: {dem_data['z_max']:.0f} m</div>
   <div class="stat">Ancho área: {dem_data['width_m']:.0f} m</div>
   <div class="stat">Alto área: {dem_data['height_m']:.0f} m</div>
+  <div class="stat">Acum. máx flujo: {hydrology_data['max_accumulation']} celdas</div>
+  <div class="stat" id="arrow-count-stat">Flechas visibles: 0</div>
+</div>
+
+<div id="layer-panel">
+  <h3>Capas</h3>
+  <div class="layer-subtitle">Base</div>
+  <label class="layer-row"><input type="radio" name="base-mode" value="simple" checked>Terreno simple</label>
+  <label class="layer-row"><input type="radio" name="base-mode" value="satellite">Imagen satelital</label>
+  <label class="layer-row"><input type="radio" name="base-mode" value="none">Sin imagen base</label>
+
+  <div class="layer-subtitle">Presets</div>
+  <div class="preset-row">
+    <button type="button" class="layer-btn" data-preset="simple">Simple</button>
+    <button type="button" class="layer-btn" data-preset="roads">Solo calles</button>
+    <button type="button" class="layer-btn" data-preset="all">Todo</button>
+    <button type="button" class="layer-btn" data-preset="clear">Quitar todo</button>
+  </div>
+
+  <div class="layer-subtitle">Contenido</div>
+  <label class="layer-row"><input id="toggle-streets" type="checkbox" checked>Calles</label>
+  <label class="layer-row"><input id="toggle-rivers" type="checkbox">Ríos</label>
+  <label class="layer-row"><input id="toggle-contours" type="checkbox">Curvas</label>
+  <label class="layer-row"><input id="toggle-catastro" type="checkbox">Catastro</label>
+  <label class="layer-row"><input id="toggle-flow-accum" type="checkbox">Acumulación</label>
+  <div class="layer-row layer-row--stack">
+    <span>Color de acumulación</span>
+    <input id="flow-color" class="layer-color" type="color" value="#ffe080">
+    <span class="layer-note">Debajo del inicio la capa queda transparente</span>
+  </div>
+  <div class="layer-split">
+    <label class="layer-row layer-row--stack layer-field">
+      <span>Inicio</span>
+      <input id="flow-range-min" class="layer-range" type="range" min="0" max="99" step="1" value="18">
+    </label>
+    <label class="layer-row layer-row--stack layer-field">
+      <span>Fin</span>
+      <input id="flow-range-max" class="layer-range" type="range" min="1" max="100" step="1" value="82">
+    </label>
+  </div>
+  <div id="flow-range-label" class="layer-note">Visible entre 18% y 82%</div>
+  <label class="layer-row"><input id="toggle-flow-arrows" type="checkbox">Flechas</label>
+  <label class="layer-row layer-row--stack">
+    <span>Densidad de flechas: <strong id="arrow-density-label">Media</strong></span>
+    <input id="arrow-density" class="layer-range" type="range" min="1" max="5" step="1" value="3">
+    <span class="layer-note">Baja a alta densidad</span>
+  </label>
+  <label class="layer-row"><input id="toggle-green" type="checkbox">Zonas verdes</label>
+  <label class="layer-row"><input id="toggle-drainage" type="checkbox">Desfogues</label>
+  <label class="layer-row"><input id="toggle-curtain" type="checkbox">Área de estudio</label>
+  <label class="layer-row"><input id="toggle-grid" type="checkbox">Retícula</label>
 </div>
 
 <div id="legend">
@@ -1328,6 +1644,8 @@ def make_html(dem_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_
   <div class="leg-item"><span class="leg-swatch" style="background:#4fc3f7;height:4px"></span>Ríos / Cauces</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#ff4dd2;height:4px"></span>Calles / red vial OSM</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#ffffff;height:8px;border:1px solid #4a4a4a"></span>Catastro SNIT</div>
+  <div class="leg-item"><span id="flow-legend-swatch" class="leg-swatch" style="background:linear-gradient(90deg,rgba(255,224,128,0),rgba(255,224,128,1));height:10px;border-radius:3px"></span>Acumulación de flujo</div>
+  <div class="leg-item"><span class="leg-swatch" style="background:#8fe9ff;height:3px"></span>Flechas de flujo</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#53b66b;height:10px;border-radius:3px;opacity:0.8"></span>Zonas verdes</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#FF8C00;width:12px;height:12px;border-radius:50%"></span>Puntos de desfogue</div>
   <div class="leg-item" style="color:#6a8ca0;font-size:10px;">🗺 Rutas GPS: solo en DEM</div>
@@ -1365,6 +1683,7 @@ const DRAINAGE_PTS   = {drainage_json};
 const GREEN_ZONES    = {green_json};
 const STREETS        = {streets_json};
 const CURTAIN        = {curtain_json};
+const HYDROLOGY      = {hydrology_json};
 const HAS_TEX        = {'true' if has_texture else 'false'};
 const TEX_URI        = "{tex_data_uri if has_texture else ''}";
 const HAS_CATASTRO   = {'true' if has_catastro else 'false'};
@@ -1402,6 +1721,150 @@ controls.maxDistance      = 15000;
 controls.maxPolarAngle    = Math.PI / 2 * (89.1 / 90);
 controls.target.set(0, zCenter, 0);
 controls.update();
+
+let terrainSatelliteMesh = null;
+let terrainSimpleMesh = null;
+let flowAccumMesh = null;
+let flowAccumColorAttr = null;
+
+const baseTerrainLayer = new THREE.Group();
+const catastroLayer = new THREE.Group();
+const gridLayer = new THREE.Group();
+const curtainLayer = new THREE.Group();
+const contourLayer = new THREE.Group();
+const riverLayer = new THREE.Group();
+const streetLayer = new THREE.Group();
+const greenLayer = new THREE.Group();
+const drainageLayer = new THREE.Group();
+const flowAccumLayer = new THREE.Group();
+const flowArrowLayer = new THREE.Group();
+
+for (const layer of [
+  baseTerrainLayer, catastroLayer, gridLayer, curtainLayer, contourLayer,
+  riverLayer, streetLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
+]) {{
+  scene.add(layer);
+}}
+
+const layerGroups = {{
+  contours: contourLayer,
+  rivers: riverLayer,
+  streets: streetLayer,
+  catastro: catastroLayer,
+  flowAccum: flowAccumLayer,
+  flowArrows: flowArrowLayer,
+  green: greenLayer,
+  drainage: drainageLayer,
+  curtain: curtainLayer,
+  grid: gridLayer,
+}};
+
+const viewerState = {{
+  baseMode: 'simple',
+  arrowDensity: 3,
+  flowColor: '#ffe080',
+  flowRangeMin: 0.18,
+  flowRangeMax: 0.82,
+  contours: false,
+  rivers: false,
+  streets: true,
+  catastro: false,
+  flowAccum: false,
+  flowArrows: false,
+  green: false,
+  drainage: false,
+  curtain: false,
+  grid: false,
+}};
+
+const presetStates = {{
+  simple: {{
+    baseMode: 'simple',
+    contours: false,
+    rivers: true,
+    streets: true,
+    catastro: false,
+    flowAccum: false,
+    flowArrows: false,
+    green: false,
+    drainage: true,
+    curtain: false,
+    grid: false,
+  }},
+  roads: {{
+    baseMode: 'simple',
+    contours: false,
+    rivers: false,
+    streets: true,
+    catastro: false,
+    flowAccum: false,
+    flowArrows: false,
+    green: false,
+    drainage: false,
+    curtain: false,
+    grid: false,
+  }},
+  all: {{
+    baseMode: HAS_TEX && TEX_URI ? 'satellite' : 'simple',
+    contours: true,
+    rivers: true,
+    streets: true,
+    catastro: HAS_CATASTRO && CATASTRO_URI,
+    flowAccum: true,
+    flowArrows: true,
+    green: true,
+    drainage: true,
+    curtain: true,
+    grid: false,
+  }},
+  clear: {{
+    baseMode: 'none',
+    contours: false,
+    rivers: false,
+    streets: false,
+    catastro: false,
+    flowAccum: false,
+    flowArrows: false,
+    green: false,
+    drainage: false,
+    curtain: false,
+    grid: false,
+  }},
+}};
+
+const uiBaseInputs = Array.from(document.querySelectorAll('input[name="base-mode"]'));
+const uiArrowDensity = document.getElementById('arrow-density');
+const uiArrowDensityLabel = document.getElementById('arrow-density-label');
+const uiFlowColor = document.getElementById('flow-color');
+const uiFlowRangeMin = document.getElementById('flow-range-min');
+const uiFlowRangeMax = document.getElementById('flow-range-max');
+const uiFlowRangeLabel = document.getElementById('flow-range-label');
+const flowLegendSwatch = document.getElementById('flow-legend-swatch');
+const arrowCountStat = document.getElementById('arrow-count-stat');
+const uiToggles = {{
+  streets: document.getElementById('toggle-streets'),
+  rivers: document.getElementById('toggle-rivers'),
+  contours: document.getElementById('toggle-contours'),
+  catastro: document.getElementById('toggle-catastro'),
+  flowAccum: document.getElementById('toggle-flow-accum'),
+  flowArrows: document.getElementById('toggle-flow-arrows'),
+  green: document.getElementById('toggle-green'),
+  drainage: document.getElementById('toggle-drainage'),
+  curtain: document.getElementById('toggle-curtain'),
+  grid: document.getElementById('toggle-grid'),
+}};
+
+const ARROW_DENSITY_CONFIG = {{
+  1: {{ label: 'Muy baja', stride: 18, minStrength: 0.36 }},
+  2: {{ label: 'Baja',     stride: 14, minStrength: 0.30 }},
+  3: {{ label: 'Media',    stride: 10, minStrength: 0.24 }},
+  4: {{ label: 'Alta',     stride: 8,  minStrength: 0.19 }},
+  5: {{ label: 'Muy alta', stride: 6,  minStrength: 0.15 }},
+}};
+
+const CELL_W = DEM.widthM / Math.max(1, DEM.nx - 1);
+const CELL_H = DEM.heightM / Math.max(1, DEM.ny - 1);
+const CELL_MIN = Math.min(CELL_W, CELL_H);
 
 // ═══════════════════════════════════════════════════════════════
 //  LUCES
@@ -1459,56 +1922,342 @@ function buildClosedPath(points, PathCtor) {{
   return path;
 }}
 
+function lerp(a, b, t) {{
+  return a + (b - a) * t;
+}}
+
+function flowColor(value) {{
+  const t = Math.pow(clamp(value, 0, 1), 0.95);
+  const low = [175, 248, 255];
+  const high = [255, 224, 128];
+  return new THREE.Color(
+    lerp(low[0], high[0], t) / 255,
+    lerp(low[1], high[1], t) / 255,
+    lerp(low[2], high[2], t) / 255
+  );
+}}
+
+function hexToRgb(hex) {{
+  const normalized = (hex || '#ffe080').replace('#', '');
+  const safeHex = normalized.length === 3
+    ? normalized.split('').map((char) => char + char).join('')
+    : normalized.padEnd(6, '0').slice(0, 6);
+  return {{
+    r: parseInt(safeHex.slice(0, 2), 16),
+    g: parseInt(safeHex.slice(2, 4), 16),
+    b: parseInt(safeHex.slice(4, 6), 16),
+  }};
+}}
+
+function smoothStep01(value) {{
+  const t = clamp(value, 0, 1);
+  return t * t * (3 - 2 * t);
+}}
+
+function clearGroup(group) {{
+  while (group.children.length) {{
+    const child = group.children.pop();
+    group.remove(child);
+    if (child.geometry) child.geometry.dispose?.();
+    if (Array.isArray(child.material)) {{
+      child.material.forEach((mat) => mat?.dispose?.());
+    }} else if (child.material) {{
+      child.material.dispose?.();
+    }}
+    if (child.line?.material) child.line.material.dispose?.();
+    if (child.cone?.material) child.cone.material.dispose?.();
+  }}
+}}
+
+function updateArrowDensityLabel() {{
+  const config = ARROW_DENSITY_CONFIG[viewerState.arrowDensity] || ARROW_DENSITY_CONFIG[3];
+  if (uiArrowDensityLabel) {{
+    uiArrowDensityLabel.textContent = config.label;
+  }}
+}}
+
+function updateArrowCountStat(count) {{
+  if (arrowCountStat) {{
+    arrowCountStat.textContent = `Flechas visibles: ${{count}}`;
+  }}
+}}
+
+function updateFlowRangeLabel() {{
+  if (uiFlowRangeLabel) {{
+    const minPct = Math.round(viewerState.flowRangeMin * 100);
+    const maxPct = Math.round(viewerState.flowRangeMax * 100);
+    uiFlowRangeLabel.textContent = `Visible entre ${{minPct}}% y ${{maxPct}}%`;
+  }}
+}}
+
+function updateFlowLegendSwatch() {{
+  if (!flowLegendSwatch) return;
+  const color = hexToRgb(viewerState.flowColor);
+  flowLegendSwatch.style.background = `linear-gradient(90deg, rgba(${{color.r}}, ${{color.g}}, ${{color.b}}, 0), rgba(${{color.r}}, ${{color.g}}, ${{color.b}}, 1))`;
+}}
+
+function rebuildFlowAccumulation() {{
+  if (!flowAccumMesh || !flowAccumColorAttr || !HYDROLOGY.accumulation || !HYDROLOGY.accumulation.length) {{
+    updateFlowRangeLabel();
+    updateFlowLegendSwatch();
+    return;
+  }}
+
+  const baseColor = hexToRgb(viewerState.flowColor);
+  const minValue = clamp(viewerState.flowRangeMin, 0, 0.99);
+  const maxValue = clamp(Math.max(minValue + 0.01, viewerState.flowRangeMax), minValue + 0.01, 1);
+  const colors = flowAccumColorAttr.array;
+
+  for (let i = 0; i < HYDROLOGY.accumulation.length; i++) {{
+    const value = HYDROLOGY.accumulation[i];
+    const ramp = smoothStep01((value - minValue) / Math.max(1e-6, maxValue - minValue));
+    const alpha = Math.pow(ramp, 0.78) * 0.82;
+    const offset = i * 4;
+    colors[offset + 0] = baseColor.r / 255;
+    colors[offset + 1] = baseColor.g / 255;
+    colors[offset + 2] = baseColor.b / 255;
+    colors[offset + 3] = alpha;
+  }}
+
+  flowAccumColorAttr.needsUpdate = true;
+  updateFlowRangeLabel();
+  updateFlowLegendSwatch();
+}}
+
+function syncFlowRange(source) {{
+  let minValue = clamp((Number(uiFlowRangeMin?.value) || 0) / 100, 0, 0.99);
+  let maxValue = clamp((Number(uiFlowRangeMax?.value) || 100) / 100, 0.01, 1);
+
+  if (maxValue <= minValue) {{
+    if (source === 'min') {{
+      maxValue = Math.min(1, minValue + 0.01);
+    }} else {{
+      minValue = Math.max(0, maxValue - 0.01);
+    }}
+  }}
+
+  viewerState.flowRangeMin = minValue;
+  viewerState.flowRangeMax = maxValue;
+
+  if (uiFlowRangeMin) {{
+    uiFlowRangeMin.value = String(Math.round(viewerState.flowRangeMin * 100));
+  }}
+  if (uiFlowRangeMax) {{
+    uiFlowRangeMax.value = String(Math.round(viewerState.flowRangeMax * 100));
+  }}
+}}
+
+function rebuildFlowArrows() {{
+  clearGroup(flowArrowLayer);
+  if (!viewerState.flowArrows || !HYDROLOGY.arrow_dx || !HYDROLOGY.arrow_dx.length) {{
+    updateArrowCountStat(0);
+    return;
+  }}
+
+  const config = ARROW_DENSITY_CONFIG[viewerState.arrowDensity] || ARROW_DENSITY_CONFIG[3];
+  const stride = config.stride;
+  const minStrength = config.minStrength;
+  const start = Math.min(Math.max(1, Math.floor(stride / 2)), Math.max(1, DEM.nx - 1));
+  let arrowCount = 0;
+
+  for (let j = start; j < DEM.ny - 1; j += stride) {{
+    for (let i = start; i < DEM.nx - 1; i += stride) {{
+      const idx = j * DEM.nx + i;
+      const strength = HYDROLOGY.arrow_strength[idx];
+      const dx = HYDROLOGY.arrow_dx[idx];
+      const dz = HYDROLOGY.arrow_dz[idx];
+      if (strength < minStrength || Math.abs(dx) + Math.abs(dz) < 1e-5) {{
+        continue;
+      }}
+
+      const x = -DEM.widthM / 2 + i * CELL_W;
+      const z = -DEM.heightM / 2 + j * CELL_H;
+      const y = sampleTerrainHeight(x, z) + 2.2 + strength * 2.8;
+      const dir = new THREE.Vector3(dx, -0.06, dz).normalize();
+      const length = Math.min(CELL_MIN * (1.7 + 3.1 * strength), stride * CELL_MIN * 0.78);
+      const color = flowColor(Math.min(1, strength));
+      const headLength = Math.max(5.5, length * 0.28);
+      const headWidth = Math.max(3.0, length * 0.11);
+      const helper = new THREE.ArrowHelper(dir, new THREE.Vector3(x, y, z), length, color.getHex(), headLength, headWidth);
+
+      helper.line.material.transparent = true;
+      helper.line.material.opacity = 0.68;
+      helper.line.material.depthWrite = false;
+      helper.cone.material.transparent = true;
+      helper.cone.material.opacity = 0.88;
+      helper.cone.material.depthWrite = false;
+      flowArrowLayer.add(helper);
+      arrowCount += 1;
+    }}
+  }}
+
+  updateArrowCountStat(arrowCount);
+}}
+
+function setBaseMode(mode) {{
+  let resolved = mode;
+  if (resolved === 'satellite' && !(HAS_TEX && TEX_URI)) {{
+    resolved = 'simple';
+  }}
+  viewerState.baseMode = resolved;
+  if (terrainSatelliteMesh) {{
+    terrainSatelliteMesh.visible = resolved === 'satellite' && HAS_TEX && TEX_URI;
+  }}
+  if (terrainSimpleMesh) {{
+    terrainSimpleMesh.visible = resolved === 'simple';
+  }}
+}}
+
+function applyViewerState() {{
+  setBaseMode(viewerState.baseMode);
+  for (const [key, group] of Object.entries(layerGroups)) {{
+    group.visible = !!viewerState[key];
+  }}
+  rebuildFlowAccumulation();
+  rebuildFlowArrows();
+}}
+
+function syncLayerPanel() {{
+  uiBaseInputs.forEach((input) => {{
+    input.checked = input.value === viewerState.baseMode;
+  }});
+  if (uiArrowDensity) {{
+    uiArrowDensity.value = String(viewerState.arrowDensity);
+  }}
+  if (uiFlowColor) {{
+    uiFlowColor.value = viewerState.flowColor;
+  }}
+  if (uiFlowRangeMin) {{
+    uiFlowRangeMin.value = String(Math.round(viewerState.flowRangeMin * 100));
+  }}
+  if (uiFlowRangeMax) {{
+    uiFlowRangeMax.value = String(Math.round(viewerState.flowRangeMax * 100));
+  }}
+  updateArrowDensityLabel();
+  updateFlowRangeLabel();
+  updateFlowLegendSwatch();
+  for (const [key, input] of Object.entries(uiToggles)) {{
+    if (input) input.checked = !!viewerState[key];
+  }}
+}}
+
+function applyPreset(name) {{
+  const preset = presetStates[name];
+  if (!preset) return;
+  Object.assign(viewerState, preset);
+  applyViewerState();
+  syncLayerPanel();
+}}
+
+uiBaseInputs.forEach((input) => {{
+  input.addEventListener('change', () => {{
+    if (!input.checked) return;
+    setBaseMode(input.value);
+    applyViewerState();
+    syncLayerPanel();
+  }});
+}});
+
+if (uiArrowDensity) {{
+  uiArrowDensity.addEventListener('input', () => {{
+    viewerState.arrowDensity = Number(uiArrowDensity.value) || 3;
+    updateArrowDensityLabel();
+    rebuildFlowArrows();
+  }});
+}}
+
+if (uiFlowColor) {{
+  uiFlowColor.addEventListener('input', () => {{
+    viewerState.flowColor = uiFlowColor.value || '#ffe080';
+    rebuildFlowAccumulation();
+  }});
+}}
+
+if (uiFlowRangeMin) {{
+  uiFlowRangeMin.addEventListener('input', () => {{
+    syncFlowRange('min');
+    rebuildFlowAccumulation();
+  }});
+}}
+
+if (uiFlowRangeMax) {{
+  uiFlowRangeMax.addEventListener('input', () => {{
+    syncFlowRange('max');
+    rebuildFlowAccumulation();
+  }});
+}}
+
+for (const [key, input] of Object.entries(uiToggles)) {{
+  if (!input) continue;
+  input.addEventListener('change', () => {{
+    viewerState[key] = input.checked;
+    applyViewerState();
+  }});
+}}
+
+document.querySelectorAll('[data-preset]').forEach((button) => {{
+  button.addEventListener('click', () => {{
+    applyPreset(button.dataset.preset);
+  }});
+}});
+
 // ═══════════════════════════════════════════════════════════════
 //  TERRENO
 // ═══════════════════════════════════════════════════════════════
-(function buildTerrain() {{
+function buildTerrainGeometry() {{
   const geo = new THREE.PlaneGeometry(
     DEM.widthM, DEM.heightM,
     DEM.nx - 1, DEM.ny - 1
   );
-
-  // Asignar alturas – el plano tiene vértices en fila/columna
-  // PlaneGeometry está en el plano XY (Z=0 inicialmente)
   const pos = geo.attributes.position;
   for (let i = 0; i < pos.count; i++) {{
     pos.setZ(i, DEM.heights[i]);
   }}
   pos.needsUpdate = true;
   geo.computeVertexNormals();
+  return geo;
+}}
 
-  let mat;
+function buildSimpleTerrainMaterial(geo) {{
+  const colors = [];
+  const pos = geo.attributes.position;
+  const dz = Math.max(1e-6, DEM.zMax - DEM.zMin);
+  for (let i = 0; i < pos.count; i++) {{
+    const h = (pos.getZ(i) - DEM.zMin) / dz;
+    const c = new THREE.Color();
+    c.setHSL(0.18 - h * 0.07, 0.24, 0.36 + h * 0.20);
+    colors.push(c.r, c.g, c.b);
+  }}
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3));
+  return new THREE.MeshLambertMaterial({{
+    vertexColors: true,
+    side: THREE.FrontSide,
+  }});
+}}
+
+(function buildTerrain() {{
+  const simpleGeo = buildTerrainGeometry();
+  terrainSimpleMesh = new THREE.Mesh(simpleGeo, buildSimpleTerrainMaterial(simpleGeo));
+  terrainSimpleMesh.rotation.x = -Math.PI / 2;
+  terrainSimpleMesh.receiveShadow = true;
+  baseTerrainLayer.add(terrainSimpleMesh);
+
   if (HAS_TEX && TEX_URI) {{
+    const satGeo = buildTerrainGeometry();
     const loader = new THREE.TextureLoader();
     const tex = loader.load(TEX_URI);
     tex.wrapS = THREE.ClampToEdgeWrapping;
     tex.wrapT = THREE.ClampToEdgeWrapping;
-    mat = new THREE.MeshLambertMaterial({{
+
+    terrainSatelliteMesh = new THREE.Mesh(satGeo, new THREE.MeshLambertMaterial({{
       map: tex,
       side: THREE.FrontSide,
-    }});
-  }} else {{
-    // Color por elevación como fallback
-    mat = new THREE.MeshLambertMaterial({{
-      color: 0x4a7c3f, wireframe: false,
-    }});
-    // Colorear vértices por elevación
-    const colors = [];
-    const pos2 = geo.attributes.position;
-    for (let i = 0; i < pos2.count; i++) {{
-      const h = (pos2.getZ(i) - DEM.zMin) / (DEM.zMax - DEM.zMin);
-      const c = new THREE.Color();
-      c.setHSL(0.33 - h * 0.33, 0.7, 0.2 + h * 0.5);
-      colors.push(c.r, c.g, c.b);
-    }}
-    geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3));
-    mat.vertexColors = true;
+    }}));
+    terrainSatelliteMesh.rotation.x = -Math.PI / 2;
+    terrainSatelliteMesh.receiveShadow = true;
+    terrainSatelliteMesh.visible = false;
+    baseTerrainLayer.add(terrainSatelliteMesh);
   }}
-
-  const terrain = new THREE.Mesh(geo, mat);
-  terrain.rotation.x = -Math.PI / 2;
-  terrain.receiveShadow = true;
-  scene.add(terrain);
 }})();
 
 // ═══════════════════════════════════════════════════════════════
@@ -1549,17 +2298,52 @@ function buildClosedPath(points, PathCtor) {{
     const overlay = new THREE.Mesh(geo, mat);
     overlay.rotation.x = -Math.PI / 2;
     overlay.renderOrder = 1;
-    scene.add(overlay);
+    catastroLayer.add(overlay);
   }});
 }})();
 
 // ═══════════════════════════════════════════════════════════════
 //  GRID HELPER
 // ═══════════════════════════════════════════════════════════════
+(function buildFlowAccumulation() {{
+  if (!HYDROLOGY.accumulation || !HYDROLOGY.accumulation.length) return;
+
+  const geo = new THREE.PlaneGeometry(
+    DEM.widthM, DEM.heightM,
+    DEM.nx - 1, DEM.ny - 1
+  );
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 4);
+
+  for (let i = 0; i < pos.count; i++) {{
+    pos.setZ(i, DEM.heights[i] + 0.95);
+  }}
+  pos.needsUpdate = true;
+  flowAccumColorAttr = new THREE.BufferAttribute(colors, 4);
+  geo.setAttribute('color', flowAccumColorAttr);
+
+  const mat = new THREE.MeshBasicMaterial({{
+    vertexColors: true,
+    transparent: true,
+    opacity: 1.0,
+    alphaTest: 0.01,
+    depthWrite: false,
+    blending: THREE.NormalBlending,
+    side: THREE.DoubleSide,
+  }});
+
+  const overlay = new THREE.Mesh(geo, mat);
+  overlay.rotation.x = -Math.PI / 2;
+  overlay.renderOrder = 2;
+  flowAccumMesh = overlay;
+  flowAccumLayer.add(overlay);
+  rebuildFlowAccumulation();
+}})();
+
 const gridSize = Math.max(DEM.widthM, DEM.heightM) * 1.2;
 const grid = new THREE.GridHelper(gridSize, 20, 0x223344, 0x112233);
 grid.position.y = DEM.zMin - 12;
-scene.add(grid);
+gridLayer.add(grid);
 
 // ═══════════════════════════════════════════════════════════════
 //  CORTINA DEL ÁREA DE ESTUDIO
@@ -1580,13 +2364,13 @@ if (CURTAIN) {{
     depthWrite: false,
     side: THREE.DoubleSide,
   }});
-  scene.add(new THREE.Mesh(cGeo, cMat));
+  curtainLayer.add(new THREE.Mesh(cGeo, cMat));
 
   // Línea sólida en el tope
   const topPts = CURTAIN.top_line.map(p => new THREE.Vector3(p[0], p[1], p[2]));
   const topGeo = new THREE.BufferGeometry().setFromPoints(topPts);
   const topMat = new THREE.LineBasicMaterial({{ color: 0xff2222, linewidth: 2 }});
-  scene.add(new THREE.Line(topGeo, topMat));
+  curtainLayer.add(new THREE.Line(topGeo, topMat));
 }}
 
 // ═══════════════════════════════════════════════════════════════
@@ -1598,7 +2382,7 @@ for (const [key, data] of Object.entries(CONTOURS)) {{
     const pts = seg.map(p => new THREE.Vector3(p[0], p[1], p[2]));
     const geo = new THREE.BufferGeometry().setFromPoints(pts);
     const mat = new THREE.LineBasicMaterial({{ color: color, linewidth: 1.5, opacity: 0.90, transparent: true }});
-    scene.add(new THREE.Line(geo, mat));
+    contourLayer.add(new THREE.Line(geo, mat));
   }}
 }}
 
@@ -1609,7 +2393,7 @@ for (const seg of RIVERS) {{
   const pts = seg.map(p => new THREE.Vector3(p[0], p[1], p[2]));
   const geo = new THREE.BufferGeometry().setFromPoints(pts);
   const mat = new THREE.LineBasicMaterial({{ color: 0x4fc3f7, linewidth: 2, opacity: 0.95, transparent: true }});
-  scene.add(new THREE.Line(geo, mat));
+  riverLayer.add(new THREE.Line(geo, mat));
 }}
 
 // ═══════════════════════════════════════════════════════════════
@@ -1624,7 +2408,7 @@ for (const street of STREETS) {{
     opacity: 0.92,
     transparent: true
   }});
-  scene.add(new THREE.Line(geo, mat));
+  streetLayer.add(new THREE.Line(geo, mat));
 }}
 
 // ═══════════════════════════════════════════════════════════════
@@ -1663,14 +2447,14 @@ if (GREEN_ZONES.length) {{
     }}
     pos.needsUpdate = true;
     geo.computeVertexNormals();
-    scene.add(new THREE.Mesh(geo, greenFillMat));
+    greenLayer.add(new THREE.Mesh(geo, greenFillMat));
 
     for (const ring of [zone.outer, ...(zone.holes || [])]) {{
       if (!ring || ring.length < 2) continue;
       const pts = ring.map(([x, z]) => new THREE.Vector3(x, sampleTerrainHeight(x, z) + 1.15, z));
       pts.push(pts[0].clone());
       const edgeGeo = new THREE.BufferGeometry().setFromPoints(pts);
-      scene.add(new THREE.Line(edgeGeo, greenEdgeMat));
+      greenLayer.add(new THREE.Line(edgeGeo, greenEdgeMat));
     }}
   }}
 }}
@@ -1683,7 +2467,7 @@ const drainMat = new THREE.MeshLambertMaterial({{ color: 0xFF8C00, emissive: 0x5
 for (const pt of DRAINAGE_PTS) {{
   const sphere = new THREE.Mesh(drainGeo, drainMat);
   sphere.position.set(pt.x, pt.y, pt.z);
-  scene.add(sphere);
+  drainageLayer.add(sphere);
 
   // Palo vertical para visibilidad
   const pillarGeo = new THREE.BufferGeometry().setFromPoints([
@@ -1691,10 +2475,12 @@ for (const pt of DRAINAGE_PTS) {{
     new THREE.Vector3(pt.x, pt.y + 25, pt.z),
   ]);
   const pillarMat = new THREE.LineBasicMaterial({{ color: 0xFF8C00 }});
-  scene.add(new THREE.Line(pillarGeo, pillarMat));
+  drainageLayer.add(new THREE.Line(pillarGeo, pillarMat));
 }}
 
 // ═══════════════════════════════════════════════════════════════
+applyPreset('roads');
+
 window.addEventListener('resize', () => {{
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
@@ -1798,6 +2584,7 @@ def main():
     # ── 6. Preparar datos 3D ────────────────────────────────
     print("\n[6] Preparando datos 3D ...")
     dem_data    = prepare_dem_for_threejs(dem, lons, lats, lon_center, lat_center)
+    hydrology_data = build_flow_hydrology(dem, lons, lats, lat_center)
     # Curvas → visibles en 3D | Rutas GPS → solo DEM
     contours_3d = contours_to_threejs(contours_dict, lon_center, lat_center, dem, lons, lats)
 
@@ -1834,7 +2621,7 @@ def main():
     # ── 8. Generar HTML ─────────────────────────────────────
     print("\n[8] Generando HTML ...")
     html_content = make_html(
-        dem_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_zones_2d, streets_3d,
+        dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_zones_2d, streets_3d,
         tex_b64, catastro_b64, vendor_js, lon_center, lat_center
     )
 
