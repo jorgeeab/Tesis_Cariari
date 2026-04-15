@@ -102,11 +102,13 @@ CACHE_RAW = OUT_DIR / "_cache_curvas_raw"
 CACHE_CLP = OUT_DIR / "_cache_curvas_clipped"
 CACHE_OSM = OUT_DIR / "_cache_osm"
 CACHE_CAT = OUT_DIR / "_cache_catastro"
+CACHE_OVERTURE = OUT_DIR / "_cache_overture"
 
 # Archivos de datos adicionales (ríos y puntos de desfogue)
 CAUCE_SHP        = Path("Arcgis shapes y curvas/Cauce.shp")
 OSM_KML          = Path("Arcgis shapes y curvas/Open Street Map & Cariari, etc.kml")
 ZONAS_VERDES_KML = Path("Arcgis shapes y curvas/Zonas Verdes.kml")
+OPEN_BUILDINGS_GEOJSON = CACHE_OVERTURE / "building_test.geojson"
 OUT_HTML         = OUT_DIR / "Refinado_30_ThreeJS_Cortina_Ajustada.html"
 
 # ─────────────────────────────────────────────────────────────
@@ -862,6 +864,184 @@ def green_zones_to_threejs(polygons, lon_center, lat_center):
     return out
 
 
+def read_open_buildings_geojson(geojson_path, lon_min, lat_min, lon_max, lat_max):
+    """
+    Lee huellas de edificios desde un GeoJSON local y retorna:
+      [{ "id": str, "source": str, "source_class": str, "height_m": float,
+         "outer": [(lon, lat), ...], "holes": [[(lon, lat), ...], ...] }]
+    """
+    if not geojson_path.exists():
+        print(f"  Open Buildings no encontrado: {geojson_path}")
+        return []
+
+    try:
+        with open(geojson_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"  Error leyendo Open Buildings: {e}")
+        return []
+
+    def clean_ring(ring):
+        out = []
+        for coord in ring or []:
+            if not isinstance(coord, (list, tuple)) or len(coord) < 2:
+                continue
+            try:
+                out.append((float(coord[0]), float(coord[1])))
+            except Exception:
+                continue
+        if len(out) >= 2 and out[0] == out[-1]:
+            out = out[:-1]
+        return out
+
+    def polygon_area_m2(ring):
+        if len(ring) < 3:
+            return 0.0
+        lon0, lat0 = ring[0]
+        mpd_lon = 111320.0 * math.cos(math.radians(lat0))
+        mpd_lat = 110540.0
+        pts = [((lon - lon0) * mpd_lon, (lat - lat0) * mpd_lat) for lon, lat in ring]
+        area2 = 0.0
+        for i, (x1, y1) in enumerate(pts):
+            x2, y2 = pts[(i + 1) % len(pts)]
+            area2 += x1 * y2 - x2 * y1
+        return abs(area2) * 0.5
+
+    def classify_source(source_name):
+        label = (source_name or "").lower()
+        if "google" in label:
+            return "google"
+        if "microsoft" in label:
+            return "microsoft"
+        if "openstreetmap" in label:
+            return "osm"
+        return "other"
+
+    def infer_height_m(props, outer_ring):
+        numeric_keys = [
+            "height", "height_m", "render_height", "roof_height",
+            "building:height", "building_height",
+        ]
+        for key in numeric_keys:
+            value = props.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                parsed = float(str(value).replace("m", "").strip())
+                if 2.0 <= parsed <= 250.0:
+                    return parsed
+            except Exception:
+                pass
+
+        level_keys = ["levels", "building:levels", "num_floors", "floors"]
+        for key in level_keys:
+            value = props.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                levels = float(value)
+                if 1.0 <= levels <= 80.0:
+                    return levels * 3.2
+            except Exception:
+                pass
+
+        area_m2 = polygon_area_m2(outer_ring)
+        if area_m2 < 45.0:
+            return 3.8
+        if area_m2 < 120.0:
+            return 5.5
+        if area_m2 < 300.0:
+            return 7.5
+        if area_m2 < 900.0:
+            return 10.5
+        return 14.0
+
+    buildings = []
+    for feature in data.get("features", []):
+        geom = feature.get("geometry") or {}
+        props = feature.get("properties") or {}
+        geom_type = geom.get("type")
+        coords = geom.get("coordinates") or []
+
+        if geom_type == "Polygon":
+            polygons = [coords]
+        elif geom_type == "MultiPolygon":
+            polygons = coords
+        else:
+            continue
+
+        sources = props.get("sources") or []
+        source_name = ""
+        if sources and isinstance(sources[0], dict):
+            source_name = sources[0].get("dataset", "") or ""
+
+        confidence = None
+        if sources and isinstance(sources[0], dict):
+            confidence = sources[0].get("confidence")
+
+        for poly_coords in polygons:
+            if not poly_coords:
+                continue
+            outer_ring = clean_ring(poly_coords[0])
+            holes = []
+            for ring in poly_coords[1:]:
+                cleaned = clean_ring(ring)
+                if len(cleaned) >= 3:
+                    holes.append(cleaned)
+
+            if len(outer_ring) < 3:
+                continue
+
+            ring_lons = [pt[0] for pt in outer_ring]
+            ring_lats = [pt[1] for pt in outer_ring]
+            if max(ring_lons) < lon_min or min(ring_lons) > lon_max or max(ring_lats) < lat_min or min(ring_lats) > lat_max:
+                continue
+
+            buildings.append({
+                "id": str(props.get("id", f"building_{len(buildings) + 1}")),
+                "source": source_name or "Open Buildings",
+                "source_class": classify_source(source_name),
+                "confidence": confidence,
+                "height_m": round(max(3.0, min(60.0, infer_height_m(props, outer_ring))), 2),
+                "outer": outer_ring,
+                "holes": holes,
+            })
+
+    print(f"  Open Buildings: {len(buildings)} edificios dentro del area")
+    return buildings
+
+
+def buildings_to_threejs(buildings, lon_center, lat_center):
+    """Convierte edificios en lon/lat a huellas XZ + altura para extrusion Three.js."""
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_center))
+    mpd_lat = 110540.0
+
+    def ring_to_xz(ring):
+        out = []
+        for lon, lat in ring:
+            x_m = (lon - lon_center) * mpd_lon
+            y_m = (lat - lat_center) * mpd_lat
+            out.append([round(x_m, 2), round(-y_m, 2)])
+        return out
+
+    out = []
+    for building in buildings:
+        outer = ring_to_xz(building["outer"])
+        holes = [ring_to_xz(ring) for ring in building.get("holes", []) if len(ring) >= 3]
+        if len(outer) < 3:
+            continue
+        out.append({
+            "id": building.get("id", ""),
+            "source": building.get("source", "Open Buildings"),
+            "source_class": building.get("source_class", "other"),
+            "confidence": building.get("confidence"),
+            "height": round(float(building.get("height_m", 6.0)), 2),
+            "outer": outer,
+            "holes": holes,
+        })
+    return out
+
+
 def download_osm_streets(lon_min, lat_min, lon_max, lat_max):
     """
     Descarga calles/carreteras de OSM vía Overpass para el bbox dado.
@@ -1413,13 +1593,14 @@ def download_vendors():
 #  8. GENERACIÓN DEL HTML
 # ─────────────────────────────────────────────────────────────
 
-def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_zones_2d, streets_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center):
+def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_zones_2d, streets_3d, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center):
     """
     Genera el HTML autocontenido con Three.js.
     - Curvas de nivel: visibles en 3D (sobre la superficie del terreno)
     - Ríos (Cauce.shp): líneas azul-cian
     - Calles OSM: líneas sobre la superficie para apoyar análisis de escorrentía
     - Catastro SNIT: overlay raster transparente sobre el terreno
+    - Open Buildings: extrusion 3D apoyada sobre el terreno
     - Hidrologia: acumulacion de flujo por color + flechas de direccion
     - Puntos de desfogue (OSM KML): esferas naranja con etiqueta
     - Zonas verdes (KML): polígonos semitransparentes sobre el terreno
@@ -1441,6 +1622,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     drainage_json  = json.dumps(drainage_pts_3d)
     green_json     = json.dumps(green_zones_2d)
     streets_json   = json.dumps(streets_3d)
+    buildings_json = json.dumps(buildings_3d)
     curtain_json   = json.dumps(curtain) if curtain else "null"
     hydrology_json = json.dumps(hydrology_data)
 
@@ -1584,6 +1766,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <div class="stat">Ancho área: {dem_data['width_m']:.0f} m</div>
   <div class="stat">Alto área: {dem_data['height_m']:.0f} m</div>
   <div class="stat">Acum. máx flujo: {hydrology_data['max_accumulation']} celdas</div>
+  <div class="stat">Edificios 3D: {len(buildings_3d)}</div>
   <div class="stat" id="arrow-count-stat">Flechas visibles: 0</div>
 </div>
 
@@ -1604,6 +1787,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
 
   <div class="layer-subtitle">Contenido</div>
   <label class="layer-row"><input id="toggle-streets" type="checkbox" checked>Calles</label>
+  <label class="layer-row"><input id="toggle-buildings" type="checkbox" checked>Edificios 3D</label>
   <label class="layer-row"><input id="toggle-rivers" type="checkbox">Ríos</label>
   <label class="layer-row"><input id="toggle-contours" type="checkbox">Curvas</label>
   <label class="layer-row"><input id="toggle-catastro" type="checkbox">Catastro</label>
@@ -1643,6 +1827,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <div class="leg-item"><span class="leg-swatch" style="background:#ff0000;opacity:0.7;height:10px;border-radius:3px"></span>Área de estudio</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#4fc3f7;height:4px"></span>Ríos / Cauces</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#ff4dd2;height:4px"></span>Calles / red vial OSM</div>
+  <div class="leg-item"><span class="leg-swatch" style="background:#d6c39a;height:10px;border-radius:3px;border:1px solid rgba(255,255,255,0.2)"></span>Edificios Open Buildings</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#ffffff;height:8px;border:1px solid #4a4a4a"></span>Catastro SNIT</div>
   <div class="leg-item"><span id="flow-legend-swatch" class="leg-swatch" style="background:linear-gradient(90deg,rgba(255,224,128,0),rgba(255,224,128,1));height:10px;border-radius:3px"></span>Acumulación de flujo</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#8fe9ff;height:3px"></span>Flechas de flujo</div>
@@ -1682,6 +1867,7 @@ const RIVERS         = {rivers_json};
 const DRAINAGE_PTS   = {drainage_json};
 const GREEN_ZONES    = {green_json};
 const STREETS        = {streets_json};
+const BUILDINGS      = {buildings_json};
 const CURTAIN        = {curtain_json};
 const HYDROLOGY      = {hydrology_json};
 const HAS_TEX        = {'true' if has_texture else 'false'};
@@ -1734,6 +1920,7 @@ const curtainLayer = new THREE.Group();
 const contourLayer = new THREE.Group();
 const riverLayer = new THREE.Group();
 const streetLayer = new THREE.Group();
+const buildingLayer = new THREE.Group();
 const greenLayer = new THREE.Group();
 const drainageLayer = new THREE.Group();
 const flowAccumLayer = new THREE.Group();
@@ -1741,7 +1928,7 @@ const flowArrowLayer = new THREE.Group();
 
 for (const layer of [
   baseTerrainLayer, catastroLayer, gridLayer, curtainLayer, contourLayer,
-  riverLayer, streetLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
+  riverLayer, streetLayer, buildingLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
 ]) {{
   scene.add(layer);
 }}
@@ -1750,6 +1937,7 @@ const layerGroups = {{
   contours: contourLayer,
   rivers: riverLayer,
   streets: streetLayer,
+  buildings: buildingLayer,
   catastro: catastroLayer,
   flowAccum: flowAccumLayer,
   flowArrows: flowArrowLayer,
@@ -1768,6 +1956,7 @@ const viewerState = {{
   contours: false,
   rivers: false,
   streets: true,
+  buildings: true,
   catastro: false,
   flowAccum: false,
   flowArrows: false,
@@ -1783,6 +1972,7 @@ const presetStates = {{
     contours: false,
     rivers: true,
     streets: true,
+    buildings: true,
     catastro: false,
     flowAccum: false,
     flowArrows: false,
@@ -1796,6 +1986,7 @@ const presetStates = {{
     contours: false,
     rivers: false,
     streets: true,
+    buildings: true,
     catastro: false,
     flowAccum: false,
     flowArrows: false,
@@ -1809,6 +2000,7 @@ const presetStates = {{
     contours: true,
     rivers: true,
     streets: true,
+    buildings: true,
     catastro: HAS_CATASTRO && CATASTRO_URI,
     flowAccum: true,
     flowArrows: true,
@@ -1822,6 +2014,7 @@ const presetStates = {{
     contours: false,
     rivers: false,
     streets: false,
+    buildings: false,
     catastro: false,
     flowAccum: false,
     flowArrows: false,
@@ -1843,6 +2036,7 @@ const flowLegendSwatch = document.getElementById('flow-legend-swatch');
 const arrowCountStat = document.getElementById('arrow-count-stat');
 const uiToggles = {{
   streets: document.getElementById('toggle-streets'),
+  buildings: document.getElementById('toggle-buildings'),
   rivers: document.getElementById('toggle-rivers'),
   contours: document.getElementById('toggle-contours'),
   catastro: document.getElementById('toggle-catastro'),
@@ -2412,6 +2606,57 @@ for (const street of STREETS) {{
 }}
 
 // ═══════════════════════════════════════════════════════════════
+//  EDIFICIOS 3D (OPEN BUILDINGS)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+if (BUILDINGS.length) {{
+  const buildingMaterials = {{
+    google: new THREE.MeshLambertMaterial({{ color: 0xc8a86b, opacity: 0.88, transparent: true }}),
+    microsoft: new THREE.MeshLambertMaterial({{ color: 0x9eb9d9, opacity: 0.88, transparent: true }}),
+    osm: new THREE.MeshLambertMaterial({{ color: 0xd9d3c7, opacity: 0.90, transparent: true }}),
+    other: new THREE.MeshLambertMaterial({{ color: 0xc7c9cf, opacity: 0.88, transparent: true }}),
+  }};
+
+  for (const building of BUILDINGS) {{
+    const shape = buildClosedPath(building.outer, THREE.Shape);
+    if (!shape) continue;
+
+    for (const hole of building.holes || []) {{
+      const holePath = buildClosedPath(hole, THREE.Path);
+      if (holePath) shape.holes.push(holePath);
+    }}
+
+    const footprintSamples = [];
+    for (const [x, z] of building.outer) {{
+      footprintSamples.push(sampleTerrainHeight(x, z));
+    }}
+    if (building.outer.length) {{
+      let cx = 0;
+      let cz = 0;
+      for (const [x, z] of building.outer) {{
+        cx += x;
+        cz += z;
+      }}
+      footprintSamples.push(sampleTerrainHeight(cx / building.outer.length, cz / building.outer.length));
+    }}
+
+    const baseY = (footprintSamples.reduce((acc, value) => acc + value, 0) / Math.max(1, footprintSamples.length)) + 0.55;
+    const geo = new THREE.ExtrudeGeometry(shape, {{
+      depth: Math.max(2.8, building.height || 6.0),
+      bevelEnabled: false,
+      steps: 1,
+      curveSegments: 1,
+    }});
+    geo.rotateX(-Math.PI / 2);
+    geo.translate(0, baseY, 0);
+    geo.computeVertexNormals();
+
+    const mat = buildingMaterials[building.source_class] || buildingMaterials.other;
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.renderOrder = 3;
+    buildingLayer.add(mesh);
+  }}
+}}
+
 //  ZONAS VERDES (KML)
 // ═══════════════════════════════════════════════════════════════
 if (GREEN_ZONES.length) {{
@@ -2614,6 +2859,11 @@ def main():
     raw_streets = download_osm_streets(lon_min, lat_min, lon_max, lat_max)
     streets_3d = streets_to_threejs(raw_streets, lon_center, lat_center, dem, lons, lats)
 
+    # Open Buildings / huellas de edificios
+    print("\n[6f] Leyendo Open Buildings ...")
+    raw_buildings = read_open_buildings_geojson(OPEN_BUILDINGS_GEOJSON, lon_min, lat_min, lon_max, lat_max)
+    buildings_3d = buildings_to_threejs(raw_buildings, lon_center, lat_center)
+
     # ── 7. Descargar vendors Three.js ───────────────────────
     print("\n[7] Preparando librerías Three.js ...")
     vendor_js = download_vendors()
@@ -2621,7 +2871,7 @@ def main():
     # ── 8. Generar HTML ─────────────────────────────────────
     print("\n[8] Generando HTML ...")
     html_content = make_html(
-        dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_zones_2d, streets_3d,
+        dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_zones_2d, streets_3d, buildings_3d,
         tex_b64, catastro_b64, vendor_js, lon_center, lat_center
     )
 
