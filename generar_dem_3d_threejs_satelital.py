@@ -1007,7 +1007,12 @@ def read_open_buildings_geojson(geojson_path, lon_min, lat_min, lon_max, lat_max
                 "holes": holes,
             })
 
-    print(f"  Open Buildings: {len(buildings)} edificios dentro del area")
+    google_buildings = [b for b in buildings if b.get("source_class") == "google"]
+    if google_buildings:
+        buildings = google_buildings
+        print(f"  Open Buildings: {len(buildings)} edificios Google dentro del area")
+    else:
+        print(f"  Open Buildings: {len(buildings)} edificios dentro del area")
     return buildings
 
 
@@ -2617,29 +2622,16 @@ if (BUILDINGS.length) {{
   }};
 
   for (const building of BUILDINGS) {{
-    const shape = buildClosedPath(building.outer, THREE.Shape);
+    const outerForExtrude = building.outer.map(([x, z]) => [x, -z]);
+    const holesForExtrude = (building.holes || []).map((ring) => ring.map(([x, z]) => [x, -z]));
+    const shape = buildClosedPath(outerForExtrude, THREE.Shape);
     if (!shape) continue;
 
-    for (const hole of building.holes || []) {{
+    for (const hole of holesForExtrude) {{
       const holePath = buildClosedPath(hole, THREE.Path);
       if (holePath) shape.holes.push(holePath);
     }}
 
-    const footprintSamples = [];
-    for (const [x, z] of building.outer) {{
-      footprintSamples.push(sampleTerrainHeight(x, z));
-    }}
-    if (building.outer.length) {{
-      let cx = 0;
-      let cz = 0;
-      for (const [x, z] of building.outer) {{
-        cx += x;
-        cz += z;
-      }}
-      footprintSamples.push(sampleTerrainHeight(cx / building.outer.length, cz / building.outer.length));
-    }}
-
-    const baseY = (footprintSamples.reduce((acc, value) => acc + value, 0) / Math.max(1, footprintSamples.length)) + 0.55;
     const geo = new THREE.ExtrudeGeometry(shape, {{
       depth: Math.max(2.8, building.height || 6.0),
       bevelEnabled: false,
@@ -2647,7 +2639,14 @@ if (BUILDINGS.length) {{
       curveSegments: 1,
     }});
     geo.rotateX(-Math.PI / 2);
-    geo.translate(0, baseY, 0);
+    const pos = geo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {{
+      const x = pos.getX(i);
+      const z = pos.getZ(i);
+      const localY = pos.getY(i);
+      pos.setY(i, sampleTerrainHeight(x, z) + 0.08 + localY);
+    }}
+    pos.needsUpdate = true;
     geo.computeVertexNormals();
 
     const mat = buildingMaterials[building.source_class] || buildingMaterials.other;
