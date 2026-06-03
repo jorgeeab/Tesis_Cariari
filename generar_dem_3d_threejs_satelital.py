@@ -57,6 +57,19 @@ MARGIN_DEG         = 0.003      # margen en grados para el bounding box
 TILE_RETRY         = 3          # reintentos de descarga de tiles
 FLOW_FILL_EPS      = 0.02       # leve incremento para resolver depresiones/planicies
 FLOW_SMOOTH_PASSES = 5          # suavizado de la capa de acumulacion
+STRUCTURE_DEM_WEIGHT = 6        # peso de cotas puntuales hidraulicas sobre curvas para el DEM final
+STRUCTURE_SURFACE_TOL = 4.0     # diferencia maxima admisible contra el DEM preliminar
+STRUCTURE_MIN_ELEV  = 900.0
+STRUCTURE_MAX_ELEV  = 1100.0
+STRUCTURE_MAX_DEPTH = 12.0
+NETWORK_MAX_LINK_M  = 260.0
+NETWORK_MIN_DROP_M  = 0.10
+STREET_SNAP_MAX_M   = 24.0
+OUTLET_SNAP_MAX_M   = 42.0
+OFFSTREET_TOTAL_MAX_M = 30.0
+OUTLET_OFFSTREET_TOTAL_MAX_M = 46.0
+OFFSTREET_MAX_RATIO = 0.18
+MAX_CANDIDATES_PER_NODE = 18
 
 # URLs WFS – IGN 1:25 000
 WFS_BASE = "https://geos.snitcr.go.cr/be/IGN_25/wfs?"
@@ -108,6 +121,10 @@ CACHE_OVERTURE = OUT_DIR / "_cache_overture"
 CAUCE_SHP        = Path("Arcgis shapes y curvas/Cauce.shp")
 OSM_KML          = Path("Arcgis shapes y curvas/Open Street Map & Cariari, etc.kml")
 ZONAS_VERDES_KML = Path("Arcgis shapes y curvas/Zonas Verdes.kml")
+TRAGANTES_SHP    = Path("Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Tragantes.shp")
+CRP_SHP          = Path("Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRP.shp")
+CRN_SHP          = Path("Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRN_CAPA.shp")
+DESFOGUES_SHP    = Path("Arcgis shapes y curvas/Desfogues.shp")
 OPEN_BUILDINGS_GEOJSON = CACHE_OVERTURE / "building_test.geojson"
 OUT_HTML         = OUT_DIR / "Refinado_30_ThreeJS_Cortina_Ajustada.html"
 
@@ -156,6 +173,49 @@ def tile_to_lonlat(x, y, zoom):
     lat_r = math.atan(math.sinh(math.pi * (1 - 2 * y / n)))
     lat = math.degrees(lat_r)
     return lon, lat
+
+
+def safe_float(value):
+    """Convierte a float cuando es posible; si no, retorna None."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            value = value.strip().replace(",", ".")
+            if not value:
+                return None
+        num = float(value)
+        if math.isnan(num) or math.isinf(num):
+            return None
+        return num
+    except Exception:
+        return None
+
+
+def lonlat_distance_m(lon1, lat1, lon2, lat2, lat_ref=None):
+    """Distancia aproximada en metros usando factores medios locales."""
+    if lat_ref is None:
+        lat_ref = (lat1 + lat2) / 2.0
+    dx = (lon2 - lon1) * 111320.0 * math.cos(math.radians(lat_ref))
+    dy = (lat2 - lat1) * 110540.0
+    return math.hypot(dx, dy)
+
+
+def sample_dem_value(dem, lons, lats, lon, lat):
+    """Muestrea el DEM en lon/lat usando vecino mas cercano."""
+    if dem is None or len(lons) < 2 or len(lats) < 2:
+        return None
+    lon_min, lon_max = lons[0], lons[-1]
+    lat_min, lat_max = lats[0], lats[-1]
+    nx = len(lons)
+    ny = len(lats)
+    if lon_max == lon_min or lat_max == lat_min:
+        return None
+    fi = (lon - lon_min) / (lon_max - lon_min) * (nx - 1)
+    fj = (lat - lat_min) / (lat_max - lat_min) * (ny - 1)
+    i = int(np.clip(round(fi), 0, nx - 1))
+    j = int(np.clip(round(fj), 0, ny - 1))
+    return float(dem[j, i])
 
 # ─────────────────────────────────────────────────────────────
 #  1. AUTO-DETECCIÓN DEL ARCHIVO DE ENTRADA
@@ -429,7 +489,7 @@ def smooth_dem(dem, passes=1):
     return out
 
 
-def build_dem(gps_routes, contours_dict, lon_min, lat_min, lon_max, lat_max):
+def build_dem(gps_routes, contours_dict, lon_min, lat_min, lon_max, lat_max, extra_control_points=None):
     """
     Construye el DEM 220×220 combinando puntos GPS y curvas.
     Retorna: (dem_array 220×220, lons 1D, lats 1D)
@@ -457,6 +517,21 @@ def build_dem(gps_routes, contours_dict, lon_min, lat_min, lon_max, lat_max):
                 lon, lat = pts[i]
                 known_pts.append((lon, lat, elev))
                 total_contour += 1
+
+    total_struct = 0
+    for pt in extra_control_points or []:
+        lon = pt.get("lon")
+        lat = pt.get("lat")
+        elev = pt.get("elev")
+        if lon is None or lat is None or elev is None:
+            continue
+        weight = int(max(1, round(pt.get("weight", 1))))
+        for _ in range(weight):
+            known_pts.append((lon, lat, elev))
+        total_struct += 1
+
+    if total_struct:
+        print(f"  Puntos hidraulicos usados en DEM final: {total_struct}")
 
     print(f"  Puntos GPS: {total_gps} (×{FIELD_POINT_WEIGHT} peso) | Puntos curvas: {total_contour}")
     print(f"  Total puntos de control: {len(known_pts)}")
@@ -646,6 +721,429 @@ def read_osm_kml_points(kml_path, lon_min, lat_min, lon_max, lat_max):
 
     print(f"  Puntos de desfogue/muestreo: {len(pts)} dentro del área")
     return pts
+
+
+def read_hydraulic_point_layer(shp_path, kind, surface_field, depth_field, lon_min, lat_min, lon_max, lat_max):
+    """Lee una capa puntual hidraulica y devuelve registros homogeneos en WGS84."""
+    if not shp_path.exists() or not HAS_GEO:
+        return []
+
+    try:
+        gdf = gpd.read_file(str(shp_path))
+    except Exception as e:
+        print(f"  Advertencia: no se pudo leer {shp_path.name}: {e}")
+        return []
+
+    if gdf.empty:
+        return []
+    if gdf.crs and gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs(epsg=4326)
+
+    rows = []
+    for _, row in gdf.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty or geom.geom_type != "Point":
+            continue
+        lon = float(geom.x)
+        lat = float(geom.y)
+        if lon < lon_min or lon > lon_max or lat < lat_min or lat > lat_max:
+            continue
+
+        rows.append({
+            "id": f"{kind}_{len(rows) + 1}",
+            "kind": kind,
+            "label": kind.upper(),
+            "lon": lon,
+            "lat": lat,
+            "surface_raw": safe_float(row.get(surface_field)),
+            "depth_raw": safe_float(row.get(depth_field)),
+        })
+
+    return rows
+
+
+def read_desfogues_points(lon_min, lat_min, lon_max, lat_max):
+    """Lee desfogues desde SHP local y usa KML como complemento si existe."""
+    outlets = []
+
+    if DESFOGUES_SHP.exists() and HAS_GEO:
+        try:
+            gdf = gpd.read_file(str(DESFOGUES_SHP))
+            if not gdf.empty:
+                if gdf.crs and gdf.crs.to_epsg() != 4326:
+                    gdf = gdf.to_crs(epsg=4326)
+                for _, row in gdf.iterrows():
+                    geom = row.geometry
+                    if geom is None or geom.is_empty or geom.geom_type != "Point":
+                        continue
+                    lon = float(geom.x)
+                    lat = float(geom.y)
+                    if lon_min <= lon <= lon_max and lat_min <= lat <= lat_max:
+                        outlets.append({
+                            "id": f"desfogue_{len(outlets) + 1}",
+                            "kind": "desfogue",
+                            "label": "DESFOGUE",
+                            "name": f"Desfogue {len(outlets) + 1}",
+                            "lon": lon,
+                            "lat": lat,
+                        })
+        except Exception as e:
+            print(f"  Advertencia: no se pudo leer {DESFOGUES_SHP.name}: {e}")
+
+    for lon, lat, elev, name in read_osm_kml_points(OSM_KML, lon_min, lat_min, lon_max, lat_max):
+        duplicate = False
+        for outlet in outlets:
+            if lonlat_distance_m(lon, lat, outlet["lon"], outlet["lat"], lat_ref=lat) <= 8.0:
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        outlets.append({
+            "id": f"desfogue_{len(outlets) + 1}",
+            "kind": "desfogue",
+            "label": "DESFOGUE",
+            "name": name or f"Desfogue {len(outlets) + 1}",
+            "lon": lon,
+            "lat": lat,
+            "surface_raw": safe_float(elev),
+        })
+
+    print(f"  Desfogues consolidados: {len(outlets)}")
+    return outlets
+
+
+def classify_hydraulic_structures(structures, dem, lons, lats):
+    """
+    Decide que cotas son confiables para el DEM.
+    CRP/CRN se mantienen como nodos; solo los tragantes seran entradas/sumideros superficiales.
+    """
+    classified = []
+    used_for_dem = 0
+    flagged = 0
+
+    for row in structures:
+        terrain = sample_dem_value(dem, lons, lats, row["lon"], row["lat"])
+        raw_s = row.get("surface_raw")
+        raw_f = row.get("depth_raw")
+        depth_ok = raw_f is not None and 0.0 <= raw_f <= STRUCTURE_MAX_DEPTH
+
+        qa_flags = []
+        if raw_s is not None and not (STRUCTURE_MIN_ELEV <= raw_s <= STRUCTURE_MAX_ELEV):
+            qa_flags.append("cota_fuera_de_rango")
+        if raw_f is not None and not depth_ok:
+            qa_flags.append("profundidad_fuera_de_rango")
+
+        candidates = []
+        if raw_s is not None and STRUCTURE_MIN_ELEV <= raw_s <= STRUCTURE_MAX_ELEV:
+            candidates.append(("surface_raw", raw_s))
+            if depth_ok:
+                candidates.append(("surface_from_s_plus_f", raw_s + raw_f))
+
+        surface_elev = None
+        surface_mode = "sin_cota_util"
+        if terrain is not None:
+            for mode, candidate in candidates:
+                if abs(candidate - terrain) <= STRUCTURE_SURFACE_TOL:
+                    surface_elev = candidate
+                    surface_mode = mode
+                    break
+            if surface_elev is None and candidates:
+                for mode, candidate in candidates:
+                    if abs(candidate - terrain) <= STRUCTURE_SURFACE_TOL * 1.75:
+                        surface_elev = candidate
+                        surface_mode = f"{mode}_dudosa"
+                        qa_flags.append("cota_superficial_dudosa")
+                        break
+
+        if surface_elev is None and candidates:
+            qa_flags.append("no_uso_dem")
+
+        bottom_elev = None
+        if surface_elev is not None and depth_ok:
+            bottom_elev = surface_elev - raw_f
+        elif raw_s is not None and depth_ok and terrain is not None and raw_s < terrain - STRUCTURE_SURFACE_TOL:
+            bottom_elev = raw_s
+            qa_flags.append("s_parece_fondo")
+
+        if qa_flags:
+            flagged += 1
+        if surface_elev is not None:
+            used_for_dem += 1
+
+        classified.append({
+            **row,
+            "terrain_elev": terrain,
+            "surface_elev": surface_elev,
+            "surface_mode": surface_mode,
+            "bottom_elev": bottom_elev,
+            "depth_valid": depth_ok,
+            "use_for_dem": surface_elev is not None,
+            "qa_flags": qa_flags,
+            "role": "inlet" if row["kind"] == "tragante" else "node",
+        })
+
+    print(f"  Estructuras clasificadas: {len(classified)} | DEM={used_for_dem} | QA={flagged}")
+    return classified
+
+
+def structures_to_dem_control_points(structures):
+    """Convierte estructuras con cota valida en puntos de control ponderados."""
+    control_points = []
+    for row in structures:
+        if not row.get("use_for_dem") or row.get("surface_elev") is None:
+            continue
+        control_points.append({
+            "lon": row["lon"],
+            "lat": row["lat"],
+            "elev": row["surface_elev"],
+            "weight": STRUCTURE_DEM_WEIGHT if row["kind"] == "tragante" else max(3, STRUCTURE_DEM_WEIGHT - 2),
+            "kind": row["kind"],
+        })
+    return control_points
+
+
+def nearest_street_anchor(lon, lat, streets, lat_ref):
+    """Busca el vertice vial mas cercano para usarlo como guia de conexion."""
+    best = None
+    for street_idx, street in enumerate(streets):
+        coords = street.get("coords", [])
+        for idx, (slon, slat) in enumerate(coords):
+            dist_m = lonlat_distance_m(lon, lat, slon, slat, lat_ref=lat_ref)
+            if best is None or dist_m < best["dist_m"]:
+                best = {
+                    "lon": slon,
+                    "lat": slat,
+                    "dist_m": dist_m,
+                    "street_name": street.get("name", ""),
+                    "highway": street.get("highway", ""),
+                    "vertex_index": idx,
+                    "street_index": street_idx,
+                    "vertex_key": f"{slon:.6f},{slat:.6f}",
+                }
+    return best
+
+
+def build_street_graph(streets, lat_ref):
+    """Construye un grafo simple a partir de los vertices de la red vial."""
+    graph = {}
+    for street in streets:
+        coords = street.get("coords", [])
+        if len(coords) < 2:
+            continue
+        for idx, (lon, lat) in enumerate(coords):
+            key = f"{lon:.6f},{lat:.6f}"
+            node = graph.setdefault(key, {"lon": lon, "lat": lat, "neighbors": {}})
+            if idx > 0:
+                prev_lon, prev_lat = coords[idx - 1]
+                prev_key = f"{prev_lon:.6f},{prev_lat:.6f}"
+                dist_m = lonlat_distance_m(prev_lon, prev_lat, lon, lat, lat_ref=lat_ref)
+                graph.setdefault(prev_key, {"lon": prev_lon, "lat": prev_lat, "neighbors": {}})
+                graph[key]["neighbors"][prev_key] = min(dist_m, graph[key]["neighbors"].get(prev_key, dist_m))
+                graph[prev_key]["neighbors"][key] = min(dist_m, graph[prev_key]["neighbors"].get(key, dist_m))
+    return graph
+
+
+def shortest_path_on_streets(graph, start_key, end_key, cache):
+    """Ruta mas corta sobre el grafo vial entre dos vertices."""
+    if not graph or start_key not in graph or end_key not in graph:
+        return None
+    cache_key = tuple(sorted((start_key, end_key)))
+    if cache_key in cache:
+        return cache[cache_key]
+
+    heap = [(0.0, start_key)]
+    dist = {start_key: 0.0}
+    prev = {}
+    visited = set()
+
+    while heap:
+        cost, key = heapq.heappop(heap)
+        if key in visited:
+            continue
+        visited.add(key)
+        if key == end_key:
+            break
+        for neighbor_key, edge_cost in graph[key]["neighbors"].items():
+            new_cost = cost + edge_cost
+            if new_cost < dist.get(neighbor_key, float("inf")):
+                dist[neighbor_key] = new_cost
+                prev[neighbor_key] = key
+                heapq.heappush(heap, (new_cost, neighbor_key))
+
+    if end_key not in dist:
+        cache[cache_key] = None
+        return None
+
+    path_keys = []
+    current = end_key
+    while current != start_key:
+        path_keys.append(current)
+        current = prev[current]
+    path_keys.append(start_key)
+    path_keys.reverse()
+
+    coords = [(graph[key]["lon"], graph[key]["lat"]) for key in path_keys]
+    result = {"distance_m": dist[end_key], "coords": coords}
+    cache[cache_key] = result
+    return result
+
+
+def build_street_guided_path(src, dst, src_anchor, dst_anchor, street_graph, path_cache):
+    """Construye una polilinea guiada por calles y descarta enlaces demasiado fuera de carretera."""
+    if not src_anchor or not dst_anchor:
+        return None
+
+    src_snap_limit = STREET_SNAP_MAX_M
+    dst_snap_limit = OUTLET_SNAP_MAX_M if dst.get("kind") == "desfogue" else STREET_SNAP_MAX_M
+    if src_anchor["dist_m"] > src_snap_limit or dst_anchor["dist_m"] > dst_snap_limit:
+        return None
+
+    street_path = shortest_path_on_streets(street_graph, src_anchor["vertex_key"], dst_anchor["vertex_key"], path_cache)
+    if not street_path or not street_path.get("coords"):
+        return None
+
+    offstreet_m = src_anchor["dist_m"] + dst_anchor["dist_m"]
+    offstreet_limit = OUTLET_OFFSTREET_TOTAL_MAX_M if dst.get("kind") == "desfogue" else OFFSTREET_TOTAL_MAX_M
+    if offstreet_m > offstreet_limit:
+        return None
+
+    total_m = street_path["distance_m"] + offstreet_m
+    if total_m <= 0:
+        return None
+    if offstreet_m / total_m > OFFSTREET_MAX_RATIO:
+        return None
+
+    path = [(src["lon"], src["lat"])]
+    path.extend(street_path["coords"])
+    path.append((dst["lon"], dst["lat"]))
+    return dedupe_path_coords(path)
+
+
+def dedupe_path_coords(points):
+    """Elimina repetidos consecutivos en una secuencia lon/lat."""
+    out = []
+    for lon, lat in points:
+        if not out:
+            out.append((lon, lat))
+            continue
+        if lonlat_distance_m(lon, lat, out[-1][0], out[-1][1], lat_ref=lat) > 0.5:
+            out.append((lon, lat))
+    return out
+
+
+def build_hydraulic_network(structures, outlets, streets):
+    """
+    Red preliminar combinada:
+    - Tragantes conectan hacia CRP/CRN/desfogues.
+    - CRP/CRN conectan aguas abajo hacia CRP/CRN/desfogues.
+    """
+    usable_nodes = []
+    for row in structures:
+        hydraulic_elev = row.get("bottom_elev")
+        if hydraulic_elev is None:
+            hydraulic_elev = row.get("surface_elev")
+        if hydraulic_elev is None:
+            hydraulic_elev = row.get("terrain_elev")
+        if hydraulic_elev is None:
+            continue
+        usable_nodes.append({**row, "hydraulic_elev": hydraulic_elev})
+
+    usable_outlets = []
+    for outlet in outlets:
+        out_elev = outlet.get("surface_raw")
+        if out_elev is None:
+            out_elev = outlet.get("terrain_elev")
+        usable_outlets.append({**outlet, "hydraulic_elev": out_elev})
+
+    if not usable_nodes:
+        return []
+
+    links = []
+    seen_pairs = set()
+    lat_ref = np.mean([node["lat"] for node in usable_nodes]) if usable_nodes else 10.0
+    street_graph = build_street_graph(streets, lat_ref) if streets else {}
+    path_cache = {}
+
+    for src in sorted(usable_nodes, key=lambda item: item["hydraulic_elev"], reverse=True):
+        if src["kind"] == "tragante":
+            candidates = [n for n in usable_nodes if n["kind"] in ("crp", "crn")] or usable_outlets
+        else:
+            candidates = [n for n in usable_nodes if n["kind"] in ("crp", "crn")] + usable_outlets
+
+        candidate_rows = []
+        src_anchor = nearest_street_anchor(src["lon"], src["lat"], streets, lat_ref) if streets else None
+
+        for dst in candidates:
+            if dst["id"] == src["id"]:
+                continue
+            dst_elev = dst.get("hydraulic_elev")
+            if dst_elev is None or dst_elev > src["hydraulic_elev"] - NETWORK_MIN_DROP_M:
+                continue
+
+            pair_key = (src["id"], dst["id"])
+            if pair_key in seen_pairs:
+                continue
+
+            direct_dist = lonlat_distance_m(src["lon"], src["lat"], dst["lon"], dst["lat"], lat_ref=lat_ref)
+            if direct_dist > NETWORK_MAX_LINK_M:
+                continue
+            candidate_rows.append((direct_dist, dst))
+
+        candidate_rows.sort(key=lambda item: item[0])
+        best = None
+        for direct_dist, dst in candidate_rows[:MAX_CANDIDATES_PER_NODE]:
+            dst_anchor = nearest_street_anchor(dst["lon"], dst["lat"], streets, lat_ref) if streets else None
+            path = build_street_guided_path(src, dst, src_anchor, dst_anchor, street_graph, path_cache)
+            if not path:
+                continue
+
+            path_len = 0.0
+            for idx in range(1, len(path)):
+                path_len += lonlat_distance_m(path[idx - 1][0], path[idx - 1][1], path[idx][0], path[idx][1], lat_ref=lat_ref)
+
+            preference_penalty = 0.0
+            if src["kind"] == "tragante" and dst.get("kind") == "desfogue":
+                preference_penalty += 60.0
+            if src["kind"] in ("crp", "crn") and dst.get("kind") == "desfogue":
+                preference_penalty += 10.0
+            if dst.get("kind") == "crp":
+                preference_penalty -= 8.0
+            if dst.get("kind") == "crn":
+                preference_penalty -= 4.0
+
+            elev_gain = max(src["hydraulic_elev"] - dst_elev, 0.0)
+            score = path_len + preference_penalty - min(elev_gain * 5.0, 34.0)
+
+            if best is None or score < best["score"]:
+                best = {
+                    "dst": dst,
+                    "score": score,
+                    "src_anchor": src_anchor,
+                    "dst_anchor": dst_anchor,
+                    "direct_dist": direct_dist,
+                    "path_len": path_len,
+                    "path": path,
+                }
+
+        if best is None:
+            continue
+
+        dst = best["dst"]
+        seen_pairs.add((src["id"], dst["id"]))
+
+        links.append({
+            "id": f"link_{len(links) + 1}",
+            "source_id": src["id"],
+            "target_id": dst["id"],
+            "source_kind": src["kind"],
+            "target_kind": dst.get("kind", "desfogue"),
+            "drop_m": round(src["hydraulic_elev"] - dst["hydraulic_elev"], 2),
+            "distance_m": round(best["path_len"], 1),
+            "points": best["path"],
+        })
+
+    print(f"  Red hidraulica preliminar: {len(links)} enlaces")
+    return links
 
 
 def parse_kml_coordinates(coords_text):
@@ -1047,6 +1545,62 @@ def buildings_to_threejs(buildings, lon_center, lat_center):
     return out
 
 
+def hydraulic_nodes_to_threejs(structures, lon_center, lat_center, dem, lons, lats, hydrology_data=None):
+    """Convierte tragantes/CRP/CRN a marcadores 3D apoyados sobre el terreno."""
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_center))
+    mpd_lat = 110540.0
+    sink_loads = (hydrology_data or {}).get("sink_loads", {})
+
+    out = []
+    for row in structures:
+        terrain = sample_dem_value(dem, lons, lats, row["lon"], row["lat"])
+        if terrain is None:
+            continue
+        x_m = (row["lon"] - lon_center) * mpd_lon
+        y_m = (row["lat"] - lat_center) * mpd_lat
+        z_m = terrain * Z_EXAG
+        out.append({
+            "id": row["id"],
+            "kind": row["kind"],
+            "role": row.get("role", "node"),
+            "x": round(x_m, 2),
+            "y": round(z_m + 1.15, 2),
+            "z": round(-y_m, 2),
+            "surface": round(row["surface_elev"], 2) if row.get("surface_elev") is not None else None,
+            "bottom": round(row["bottom_elev"], 2) if row.get("bottom_elev") is not None else None,
+            "terrain": round(terrain, 2),
+            "qa": row.get("qa_flags", []),
+            "capture": sink_loads.get(row["id"], 0.0),
+        })
+    return out
+
+
+def hydraulic_links_to_threejs(links, lon_center, lat_center, dem, lons, lats):
+    """Convierte la red preliminar a lineas 3D visibles justo sobre la superficie."""
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_center))
+    mpd_lat = 110540.0
+    out = []
+    for link in links:
+        pts = []
+        for lon, lat in link.get("points", []):
+            terrain = sample_dem_value(dem, lons, lats, lon, lat)
+            if terrain is None:
+                continue
+            x_m = (lon - lon_center) * mpd_lon
+            y_m = (lat - lat_center) * mpd_lat
+            pts.append([round(x_m, 2), round(terrain * Z_EXAG + 0.55, 2), round(-y_m, 2)])
+        if len(pts) >= 2:
+            out.append({
+                "id": link["id"],
+                "source_kind": link.get("source_kind", ""),
+                "target_kind": link.get("target_kind", ""),
+                "drop_m": link.get("drop_m"),
+                "distance_m": link.get("distance_m"),
+                "points": pts,
+            })
+    return out
+
+
 def download_osm_streets(lon_min, lat_min, lon_max, lat_max):
     """
     Descarga calles/carreteras de OSM vía Overpass para el bbox dado.
@@ -1333,7 +1887,7 @@ def smooth_scalar_grid(grid, passes=1):
     return out
 
 
-def build_flow_hydrology(dem, lons, lats, lat_center):
+def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None):
     """
     Calcula direccion D8 y acumulacion de flujo, y prepara la carga util
     alineada con el DEM serializado para Three.js.
@@ -1348,6 +1902,8 @@ def build_flow_hydrology(dem, lons, lats, lat_center):
             "arrow_strength": [],
             "max_accumulation": 0,
             "arrow_count": 0,
+            "sink_loads": {},
+            "sink_count": 0,
         }
 
     mpd_lon = 111320.0 * math.cos(math.radians(lat_center))
@@ -1356,6 +1912,21 @@ def build_flow_hydrology(dem, lons, lats, lat_center):
     height_m = abs(lats[-1] - lats[0]) * mpd_lat
     cell_w = width_m / max(nx - 1, 1)
     cell_h = height_m / max(ny - 1, 1)
+
+    sink_ids_by_cell = {}
+    for sink in surface_sinks or []:
+        lon = sink.get("lon")
+        lat = sink.get("lat")
+        sink_id = sink.get("id")
+        if lon is None or lat is None or not sink_id:
+            continue
+        fi = (lon - lons[0]) / max(lons[-1] - lons[0], 1e-9) * (nx - 1)
+        fj = (lat - lats[0]) / max(lats[-1] - lats[0], 1e-9) * (ny - 1)
+        i = int(np.clip(round(fi), 0, nx - 1))
+        j = int(np.clip(round(fj), 0, ny - 1))
+        sink_ids_by_cell.setdefault((j, i), []).append(sink_id)
+
+    sink_cells = set(sink_ids_by_cell.keys())
 
     conditioned = fill_sinks_priority_flood(dem_view, epsilon=FLOW_FILL_EPS)
     flat_index = np.arange(ny * nx, dtype=np.int32).reshape(ny, nx)
@@ -1371,6 +1942,10 @@ def build_flow_hydrology(dem, lons, lats, lat_center):
 
     for j in range(ny):
         for i in range(nx):
+            if (j, i) in sink_cells:
+                receiver[j, i] = -1
+                slopes[j, i] = 0.0
+                continue
             h = conditioned[j, i]
             best_slope = 0.0
             best_idx = -1
@@ -1443,6 +2018,12 @@ def build_flow_hydrology(dem, lons, lats, lat_center):
             arrow_dz[j, i] = vz / vec_len
             valid_arrows += 1
 
+    sink_loads = {}
+    for (j, i), sink_ids in sink_ids_by_cell.items():
+        cell_load = float(acc_grid[j, i])
+        for sink_id in sink_ids:
+            sink_loads[sink_id] = round(max(cell_load, sink_loads.get(sink_id, 0.0)), 2)
+
     return {
         "accumulation": np.round(acc_overlay.ravel(), 4).tolist(),
         "arrow_dx": np.round(arrow_dx.ravel(), 4).tolist(),
@@ -1450,6 +2031,8 @@ def build_flow_hydrology(dem, lons, lats, lat_center):
         "arrow_strength": np.round(acc_norm.ravel(), 4).tolist(),
         "max_accumulation": int(round(max_acc)),
         "arrow_count": valid_arrows,
+        "sink_loads": sink_loads,
+        "sink_count": len(sink_ids_by_cell),
     }
 
 
@@ -1598,7 +2181,7 @@ def download_vendors():
 #  8. GENERACIÓN DEL HTML
 # ─────────────────────────────────────────────────────────────
 
-def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_zones_2d, streets_3d, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center):
+def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center):
     """
     Genera el HTML autocontenido con Three.js.
     - Curvas de nivel: visibles en 3D (sobre la superficie del terreno)
@@ -1625,6 +2208,8 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     contours_json  = json.dumps(contours_3d)
     rivers_json    = json.dumps(rivers_3d)
     drainage_json  = json.dumps(drainage_pts_3d)
+    hydraulic_nodes_json = json.dumps(hydraulic_nodes_3d)
+    hydraulic_links_json = json.dumps(hydraulic_links_3d)
     green_json     = json.dumps(green_zones_2d)
     streets_json   = json.dumps(streets_3d)
     buildings_json = json.dumps(buildings_3d)
@@ -1666,6 +2251,9 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     font-size:12px;
     line-height:1.8;
     backdrop-filter:blur(6px);
+    max-width:260px;
+    max-height:46vh;
+    overflow:auto;
   }}
   .leg-item {{ display:flex; align-items:center; gap:8px; }}
   .leg-swatch {{ width:24px; height:4px; border-radius:2px; }}
@@ -1680,7 +2268,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   }}
   #layer-panel {{
     position:absolute; top:14px; right:14px;
-    width:240px;
+    width:224px;
     max-height:calc(100vh - 28px);
     overflow:auto;
     background:rgba(10,10,24,0.84);
@@ -1757,10 +2345,54 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     background:#1a3852;
     border-color:rgba(111, 190, 255, 0.45);
   }}
+  #ui-buttons {{
+    position:absolute;
+    top:14px;
+    right:252px;
+    display:flex;
+    gap:8px;
+    z-index:5;
+  }}
+  .floating-toggle {{
+    background:rgba(10,10,24,0.84);
+    color:#d8efff;
+    border:1px solid rgba(111, 190, 255, 0.25);
+    border-radius:8px;
+    padding:8px 10px;
+    font-size:11px;
+    cursor:pointer;
+    backdrop-filter:blur(6px);
+  }}
+  .ui-hidden {{
+    display:none;
+  }}
+  .layer-select {{
+    width:100%;
+    margin-top:6px;
+    background:#13283b;
+    color:#d8efff;
+    border:1px solid rgba(111, 190, 255, 0.25);
+    border-radius:8px;
+    padding:6px 8px;
+  }}
+  @media (max-width: 900px) {{
+    #ui-buttons {{
+      right:14px;
+      top:auto;
+      bottom:14px;
+    }}
+    #layer-panel {{
+      width:min(224px, calc(100vw - 28px));
+    }}
+  }}
 </style>
 </head>
 <body>
 <div id="canvas-container"></div>
+<div id="ui-buttons">
+  <button id="toggle-panel-btn" class="floating-toggle" type="button">Capas</button>
+  <button id="toggle-legend-btn" class="floating-toggle" type="button">Leyenda</button>
+</div>
 
 <div id="info">
   <h2>🏔 Cariari, Costa Rica</h2>
@@ -1771,6 +2403,8 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <div class="stat">Ancho área: {dem_data['width_m']:.0f} m</div>
   <div class="stat">Alto área: {dem_data['height_m']:.0f} m</div>
   <div class="stat">Acum. máx flujo: {hydrology_data['max_accumulation']} celdas</div>
+  <div class="stat">Nodos hidráulicos: {len(hydraulic_nodes_3d)}</div>
+  <div class="stat">Entradas/salidas superficiales: {hydrology_data.get('sink_count', 0)}</div>
   <div class="stat">Edificios 3D: {len(buildings_3d)}</div>
   <div class="stat" id="arrow-count-stat">Flechas visibles: 0</div>
 </div>
@@ -1793,6 +2427,39 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <div class="layer-subtitle">Contenido</div>
   <label class="layer-row"><input id="toggle-streets" type="checkbox" checked>Calles</label>
   <label class="layer-row"><input id="toggle-buildings" type="checkbox" checked>Edificios 3D</label>
+  <div class="layer-row layer-row--stack">
+    <span>Paleta muros</span>
+    <select id="building-wall-palette" class="layer-select">
+      <option value="earth" selected>Tierra</option>
+      <option value="coastal">Costera</option>
+      <option value="forest">Bosque</option>
+      <option value="mono">Neutra</option>
+      <option value="accent">Color base</option>
+    </select>
+    <input id="building-wall-color" class="layer-color" type="color" value="#d6c39a">
+  </div>
+  <div class="layer-row layer-row--stack">
+    <span>Paleta techos</span>
+    <select id="building-roof-palette" class="layer-select">
+      <option value="terracotta" selected>Terracota</option>
+      <option value="mixed">Mixta</option>
+      <option value="slate">Pizarra</option>
+      <option value="tropical">Tropical</option>
+      <option value="sand">Arena</option>
+      <option value="accent">Color base</option>
+    </select>
+    <input id="building-roof-color" class="layer-color" type="color" value="#9b6b43">
+  </div>
+  <label class="layer-row"><input id="toggle-hydraulic-nodes" type="checkbox" checked>Nodos hidráulicos</label>
+  <label class="layer-row"><input id="toggle-hydraulic-links" type="checkbox" checked>Red combinada</label>
+  <div class="layer-row layer-row--stack">
+    <span>Color red combinada</span>
+    <input id="hydraulic-link-color" class="layer-color" type="color" value="#36e2b6">
+  </div>
+  <label class="layer-row layer-row--stack">
+    <span>Grosor red: <strong id="hydraulic-link-width-label">5.0 m</strong></span>
+    <input id="hydraulic-link-width" class="layer-range" type="range" min="2" max="10" step="0.5" value="5">
+  </label>
   <label class="layer-row"><input id="toggle-rivers" type="checkbox">Ríos</label>
   <label class="layer-row"><input id="toggle-contours" type="checkbox">Curvas</label>
   <label class="layer-row"><input id="toggle-catastro" type="checkbox">Catastro</label>
@@ -1825,7 +2492,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <label class="layer-row"><input id="toggle-grid" type="checkbox">Retícula</label>
 </div>
 
-<div id="legend">
+<div id="legend" class="ui-hidden">
   <div class="leg-item"><span class="leg-swatch" style="background:#FFD700"></span>Curvas índice</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#FFFFFF"></span>Curvas intermedias</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#A8FF60"></span>Curvas suplementarias</div>
@@ -1836,6 +2503,9 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <div class="leg-item"><span class="leg-swatch" style="background:#ffffff;height:8px;border:1px solid #4a4a4a"></span>Catastro SNIT</div>
   <div class="leg-item"><span id="flow-legend-swatch" class="leg-swatch" style="background:linear-gradient(90deg,rgba(255,224,128,0),rgba(255,224,128,1));height:10px;border-radius:3px"></span>Acumulación de flujo</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#8fe9ff;height:3px"></span>Flechas de flujo</div>
+  <div class="leg-item"><span class="leg-swatch" style="background:#ff9f1c;width:12px;height:12px;border-radius:50%"></span>Tragantes / sumideros</div>
+  <div class="leg-item"><span class="leg-swatch" style="background:#ffffff;width:12px;height:12px;border-radius:50%;border:1px solid #2f7de1"></span>CRP / CRN nodos</div>
+  <div class="leg-item"><span id="hydraulic-link-legend-swatch" class="leg-swatch" style="background:#36e2b6;height:6px"></span>Red combinada inferida</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#53b66b;height:10px;border-radius:3px;opacity:0.8"></span>Zonas verdes</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#FF8C00;width:12px;height:12px;border-radius:50%"></span>Puntos de desfogue</div>
   <div class="leg-item" style="color:#6a8ca0;font-size:10px;">🗺 Rutas GPS: solo en DEM</div>
@@ -1870,6 +2540,8 @@ const DEM = {{
 const CONTOURS       = {contours_json};
 const RIVERS         = {rivers_json};
 const DRAINAGE_PTS   = {drainage_json};
+const HYDRAULIC_NODES = {hydraulic_nodes_json};
+const HYDRAULIC_LINKS = {hydraulic_links_json};
 const GREEN_ZONES    = {green_json};
 const STREETS        = {streets_json};
 const BUILDINGS      = {buildings_json};
@@ -1926,6 +2598,8 @@ const contourLayer = new THREE.Group();
 const riverLayer = new THREE.Group();
 const streetLayer = new THREE.Group();
 const buildingLayer = new THREE.Group();
+const hydraulicNodeLayer = new THREE.Group();
+const hydraulicLinkLayer = new THREE.Group();
 const greenLayer = new THREE.Group();
 const drainageLayer = new THREE.Group();
 const flowAccumLayer = new THREE.Group();
@@ -1933,7 +2607,7 @@ const flowArrowLayer = new THREE.Group();
 
 for (const layer of [
   baseTerrainLayer, catastroLayer, gridLayer, curtainLayer, contourLayer,
-  riverLayer, streetLayer, buildingLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
+  riverLayer, streetLayer, buildingLayer, hydraulicNodeLayer, hydraulicLinkLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
 ]) {{
   scene.add(layer);
 }}
@@ -1943,6 +2617,8 @@ const layerGroups = {{
   rivers: riverLayer,
   streets: streetLayer,
   buildings: buildingLayer,
+  hydraulicNodes: hydraulicNodeLayer,
+  hydraulicLinks: hydraulicLinkLayer,
   catastro: catastroLayer,
   flowAccum: flowAccumLayer,
   flowArrows: flowArrowLayer,
@@ -1958,10 +2634,18 @@ const viewerState = {{
   flowColor: '#ffe080',
   flowRangeMin: 0.18,
   flowRangeMax: 0.82,
+  hydraulicLinkColor: '#36e2b6',
+  hydraulicLinkWidth: 5.0,
+  buildingWallPalette: 'earth',
+  buildingWallColor: '#d6c39a',
+  buildingRoofPalette: 'terracotta',
+  buildingRoofColor: '#9b6b43',
   contours: false,
   rivers: false,
   streets: true,
   buildings: true,
+  hydraulicNodes: true,
+  hydraulicLinks: true,
   catastro: false,
   flowAccum: false,
   flowArrows: false,
@@ -1978,6 +2662,8 @@ const presetStates = {{
     rivers: true,
     streets: true,
     buildings: true,
+    hydraulicNodes: true,
+    hydraulicLinks: true,
     catastro: false,
     flowAccum: false,
     flowArrows: false,
@@ -1992,6 +2678,8 @@ const presetStates = {{
     rivers: false,
     streets: true,
     buildings: true,
+    hydraulicNodes: true,
+    hydraulicLinks: true,
     catastro: false,
     flowAccum: false,
     flowArrows: false,
@@ -2006,6 +2694,8 @@ const presetStates = {{
     rivers: true,
     streets: true,
     buildings: true,
+    hydraulicNodes: true,
+    hydraulicLinks: true,
     catastro: HAS_CATASTRO && CATASTRO_URI,
     flowAccum: true,
     flowArrows: true,
@@ -2020,6 +2710,8 @@ const presetStates = {{
     rivers: false,
     streets: false,
     buildings: false,
+    hydraulicNodes: false,
+    hydraulicLinks: false,
     catastro: false,
     flowAccum: false,
     flowArrows: false,
@@ -2036,12 +2728,26 @@ const uiArrowDensityLabel = document.getElementById('arrow-density-label');
 const uiFlowColor = document.getElementById('flow-color');
 const uiFlowRangeMin = document.getElementById('flow-range-min');
 const uiFlowRangeMax = document.getElementById('flow-range-max');
+const uiHydraulicLinkColor = document.getElementById('hydraulic-link-color');
+const uiHydraulicLinkWidth = document.getElementById('hydraulic-link-width');
+const uiHydraulicLinkWidthLabel = document.getElementById('hydraulic-link-width-label');
+const uiBuildingWallPalette = document.getElementById('building-wall-palette');
+const uiBuildingWallColor = document.getElementById('building-wall-color');
+const uiBuildingRoofPalette = document.getElementById('building-roof-palette');
+const uiBuildingRoofColor = document.getElementById('building-roof-color');
+const uiLayerPanel = document.getElementById('layer-panel');
+const uiLegend = document.getElementById('legend');
+const uiTogglePanelBtn = document.getElementById('toggle-panel-btn');
+const uiToggleLegendBtn = document.getElementById('toggle-legend-btn');
 const uiFlowRangeLabel = document.getElementById('flow-range-label');
 const flowLegendSwatch = document.getElementById('flow-legend-swatch');
+const hydraulicLinkLegendSwatch = document.getElementById('hydraulic-link-legend-swatch');
 const arrowCountStat = document.getElementById('arrow-count-stat');
 const uiToggles = {{
   streets: document.getElementById('toggle-streets'),
   buildings: document.getElementById('toggle-buildings'),
+  hydraulicNodes: document.getElementById('toggle-hydraulic-nodes'),
+  hydraulicLinks: document.getElementById('toggle-hydraulic-links'),
   rivers: document.getElementById('toggle-rivers'),
   contours: document.getElementById('toggle-contours'),
   catastro: document.getElementById('toggle-catastro'),
@@ -2148,6 +2854,66 @@ function hexToRgb(hex) {{
   }};
 }}
 
+function rgbToHex(r, g, b) {{
+  const value = [r, g, b].map((channel) => clamp(Math.round(channel), 0, 255).toString(16).padStart(2, '0')).join('');
+  return `#${{value}}`;
+}}
+
+function mixHex(hexA, hexB, factor) {{
+  const a = hexToRgb(hexA);
+  const b = hexToRgb(hexB);
+  return rgbToHex(
+    lerp(a.r, b.r, factor),
+    lerp(a.g, b.g, factor),
+    lerp(a.b, b.b, factor)
+  );
+}}
+
+function paletteFromMode(mode, accentHex, roof=false) {{
+  const accent = accentHex || (roof ? '#9b6b43' : '#d6c39a');
+  const palettes = {{
+    earth: roof
+      ? ['#8a5a3a', '#9b6b43', '#b9845f', '#6f4832']
+      : ['#d6c39a', '#caa56f', '#e2d0b0', '#b99663'],
+    coastal: roof
+      ? ['#7a8798', '#5d6b7c', '#9aa7b7', '#6e8795']
+      : ['#c7d7dd', '#a9c7d2', '#d8e4e8', '#b6d2c7'],
+    forest: roof
+      ? ['#6f5c3b', '#5b6b47', '#8c7353', '#516142']
+      : ['#c8c2a1', '#b9c89a', '#d7d3b1', '#aab686'],
+    mono: roof
+      ? ['#757575', '#5f5f5f', '#8c8c8c', '#4f4f4f']
+      : ['#d8d8d8', '#bfbfbf', '#ececec', '#a6a6a6'],
+    terracotta: ['#8f573a', '#a76a48', '#bc7f5a', '#6e412d'],
+    mixed: ['#8f573a', '#68748a', '#7d6b3d', '#b79c6e', '#8b3f36', '#6f7f90'],
+    slate: ['#68748a', '#566173', '#7b879c', '#4a5564'],
+    tropical: ['#7d6b3d', '#8b7749', '#aa8c4d', '#5f5839'],
+    sand: ['#b79c6e', '#c9af7f', '#dcc498', '#9e845c'],
+  }};
+
+  if (mode === 'accent') {{
+    return roof
+      ? [mixHex(accent, '#3c2817', 0.34), accent, mixHex(accent, '#f2dcc3', 0.22), mixHex(accent, '#1e1e1e', 0.16)]
+      : [mixHex(accent, '#ffffff', 0.12), accent, mixHex(accent, '#fff5d8', 0.26), mixHex(accent, '#6b4c22', 0.18)];
+  }}
+  return palettes[mode] || (roof ? palettes.terracotta : palettes.earth);
+}}
+
+function hashString(value) {{
+  const text = String(value || '');
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {{
+    hash = ((hash << 5) - hash) + text.charCodeAt(i);
+    hash |= 0;
+  }}
+  return Math.abs(hash);
+}}
+
+function pickPaletteColor(palette, variantSeed) {{
+  const list = palette && palette.length ? palette : ['#cccccc'];
+  return list[Math.abs(variantSeed) % list.length];
+}}
+
 function smoothStep01(value) {{
   const t = clamp(value, 0, 1);
   return t * t * (3 - 2 * t);
@@ -2193,6 +2959,60 @@ function updateFlowLegendSwatch() {{
   if (!flowLegendSwatch) return;
   const color = hexToRgb(viewerState.flowColor);
   flowLegendSwatch.style.background = `linear-gradient(90deg, rgba(${{color.r}}, ${{color.g}}, ${{color.b}}, 0), rgba(${{color.r}}, ${{color.g}}, ${{color.b}}, 1))`;
+}}
+
+function updateHydraulicLinkLegend() {{
+  if (uiHydraulicLinkWidthLabel) {{
+    uiHydraulicLinkWidthLabel.textContent = `${{viewerState.hydraulicLinkWidth.toFixed(1)}} m`;
+  }}
+  if (hydraulicLinkLegendSwatch) {{
+    hydraulicLinkLegendSwatch.style.background = viewerState.hydraulicLinkColor;
+    hydraulicLinkLegendSwatch.style.height = `${{Math.max(4, viewerState.hydraulicLinkWidth)}}px`;
+  }}
+}}
+
+function recolorBuildings() {{
+  const wallPalette = paletteFromMode(viewerState.buildingWallPalette, viewerState.buildingWallColor, false);
+  const roofPalette = paletteFromMode(viewerState.buildingRoofPalette, viewerState.buildingRoofColor, true);
+  for (const child of buildingLayer.children) {{
+    if (!child.material || !child.userData) continue;
+    const seed = child.userData.paletteSeed || 0;
+    const palette = child.userData.surfaceType === 'roof' ? roofPalette : wallPalette;
+    const color = pickPaletteColor(palette, seed);
+    child.material.color.set(color);
+    if (child.userData.surfaceType === 'roof') {{
+      child.material.emissive?.set(mixHex(color, '#20140c', 0.4));
+    }}
+  }}
+}}
+
+function rebuildHydraulicLinks() {{
+  clearGroup(hydraulicLinkLayer);
+  if (!HYDRAULIC_LINKS || !HYDRAULIC_LINKS.length) return;
+
+  const radius = Math.max(1.1, viewerState.hydraulicLinkWidth * 0.42);
+  for (const link of HYDRAULIC_LINKS) {{
+    const pts = link.points.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+    if (pts.length < 2) continue;
+    const curvePath = new THREE.CurvePath();
+    for (let i = 1; i < pts.length; i++) {{
+      curvePath.add(new THREE.LineCurve3(pts[i - 1], pts[i]));
+    }}
+    const tubularSegments = Math.max(pts.length * 10, 24);
+    const geo = new THREE.TubeGeometry(curvePath, tubularSegments, radius, 8, false);
+    const mat = new THREE.MeshStandardMaterial({{
+      color: viewerState.hydraulicLinkColor,
+      emissive: viewerState.hydraulicLinkColor,
+      emissiveIntensity: 0.18,
+      roughness: 0.58,
+      metalness: 0.08,
+      transparent: true,
+      opacity: 0.92,
+    }});
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.renderOrder = 5;
+    hydraulicLinkLayer.add(mesh);
+  }}
 }}
 
 function rebuildFlowAccumulation() {{
@@ -2312,6 +3132,7 @@ function applyViewerState() {{
   for (const [key, group] of Object.entries(layerGroups)) {{
     group.visible = !!viewerState[key];
   }}
+  rebuildHydraulicLinks();
   rebuildFlowAccumulation();
   rebuildFlowArrows();
 }}
@@ -2332,9 +3153,28 @@ function syncLayerPanel() {{
   if (uiFlowRangeMax) {{
     uiFlowRangeMax.value = String(Math.round(viewerState.flowRangeMax * 100));
   }}
+  if (uiHydraulicLinkColor) {{
+    uiHydraulicLinkColor.value = viewerState.hydraulicLinkColor;
+  }}
+  if (uiHydraulicLinkWidth) {{
+    uiHydraulicLinkWidth.value = String(viewerState.hydraulicLinkWidth);
+  }}
+  if (uiBuildingWallPalette) {{
+    uiBuildingWallPalette.value = viewerState.buildingWallPalette;
+  }}
+  if (uiBuildingWallColor) {{
+    uiBuildingWallColor.value = viewerState.buildingWallColor;
+  }}
+  if (uiBuildingRoofPalette) {{
+    uiBuildingRoofPalette.value = viewerState.buildingRoofPalette;
+  }}
+  if (uiBuildingRoofColor) {{
+    uiBuildingRoofColor.value = viewerState.buildingRoofColor;
+  }}
   updateArrowDensityLabel();
   updateFlowRangeLabel();
   updateFlowLegendSwatch();
+  updateHydraulicLinkLegend();
   for (const [key, input] of Object.entries(uiToggles)) {{
     if (input) input.checked = !!viewerState[key];
   }}
@@ -2386,11 +3226,67 @@ if (uiFlowRangeMax) {{
   }});
 }}
 
+if (uiHydraulicLinkColor) {{
+  uiHydraulicLinkColor.addEventListener('input', () => {{
+    viewerState.hydraulicLinkColor = uiHydraulicLinkColor.value || '#36e2b6';
+    updateHydraulicLinkLegend();
+    rebuildHydraulicLinks();
+  }});
+}}
+
+if (uiHydraulicLinkWidth) {{
+  uiHydraulicLinkWidth.addEventListener('input', () => {{
+    viewerState.hydraulicLinkWidth = Number(uiHydraulicLinkWidth.value) || 5.0;
+    updateHydraulicLinkLegend();
+    rebuildHydraulicLinks();
+  }});
+}}
+
+if (uiBuildingWallPalette) {{
+  uiBuildingWallPalette.addEventListener('change', () => {{
+    viewerState.buildingWallPalette = uiBuildingWallPalette.value || 'earth';
+    recolorBuildings();
+  }});
+}}
+
+if (uiBuildingWallColor) {{
+  uiBuildingWallColor.addEventListener('input', () => {{
+    viewerState.buildingWallColor = uiBuildingWallColor.value || '#d6c39a';
+    recolorBuildings();
+  }});
+}}
+
+if (uiBuildingRoofPalette) {{
+  uiBuildingRoofPalette.addEventListener('change', () => {{
+    viewerState.buildingRoofPalette = uiBuildingRoofPalette.value || 'terracotta';
+    recolorBuildings();
+  }});
+}}
+
+if (uiBuildingRoofColor) {{
+  uiBuildingRoofColor.addEventListener('input', () => {{
+    viewerState.buildingRoofColor = uiBuildingRoofColor.value || '#9b6b43';
+    recolorBuildings();
+  }});
+}}
+
 for (const [key, input] of Object.entries(uiToggles)) {{
   if (!input) continue;
   input.addEventListener('change', () => {{
     viewerState[key] = input.checked;
     applyViewerState();
+  }});
+}}
+
+if (uiTogglePanelBtn && uiLayerPanel) {{
+  uiTogglePanelBtn.addEventListener('click', () => {{
+    uiLayerPanel.classList.toggle('ui-hidden');
+  }});
+}}
+
+if (uiToggleLegendBtn && uiLegend) {{
+  uiToggleLegendBtn.addEventListener('click', () => {{
+    uiLegend.classList.toggle('ui-hidden');
   }});
 }}
 
@@ -2602,9 +3498,9 @@ for (const street of STREETS) {{
   const pts = street.points.map(p => new THREE.Vector3(p[0], p[1], p[2]));
   const geo = new THREE.BufferGeometry().setFromPoints(pts);
   const mat = new THREE.LineBasicMaterial({{
-    color: 0xff4dd2,
-    linewidth: 2,
-    opacity: 0.92,
+    color: 0xd65ce6,
+    linewidth: 1.5,
+    opacity: 0.68,
     transparent: true
   }});
   streetLayer.add(new THREE.Line(geo, mat));
@@ -2613,14 +3509,40 @@ for (const street of STREETS) {{
 // ═══════════════════════════════════════════════════════════════
 //  EDIFICIOS 3D (OPEN BUILDINGS)
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-if (BUILDINGS.length) {{
-  const buildingMaterials = {{
-    google: new THREE.MeshLambertMaterial({{ color: 0xc8a86b, opacity: 0.88, transparent: true }}),
-    microsoft: new THREE.MeshLambertMaterial({{ color: 0x9eb9d9, opacity: 0.88, transparent: true }}),
-    osm: new THREE.MeshLambertMaterial({{ color: 0xd9d3c7, opacity: 0.90, transparent: true }}),
-    other: new THREE.MeshLambertMaterial({{ color: 0xc7c9cf, opacity: 0.88, transparent: true }}),
-  }};
+rebuildHydraulicLinks();
 
+for (const node of HYDRAULIC_NODES) {{
+  let color = 0xffffff;
+  if (node.kind === 'tragante') color = 0xff9f1c;
+  else if (node.kind === 'crn') color = 0x4b5563;
+  else if (node.kind === 'crp') color = 0x2f7de1;
+
+  const radius = node.kind === 'tragante' ? 2.6 : 2.1;
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 14, 12),
+    new THREE.MeshStandardMaterial({{
+      color: color,
+      emissive: node.capture > 0 ? 0x102010 : 0x000000,
+      roughness: 0.4,
+      metalness: 0.1,
+    }})
+  );
+  sphere.position.set(node.x, node.y, node.z);
+  hydraulicNodeLayer.add(sphere);
+
+  if (node.qa && node.qa.length) {{
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(radius + 0.8, 0.35, 8, 20),
+      new THREE.MeshBasicMaterial({{ color: 0xff4d4d, transparent: true, opacity: 0.85 }})
+    );
+    ring.rotation.x = Math.PI / 2;
+    ring.position.set(node.x, node.y + 0.2, node.z);
+    hydraulicNodeLayer.add(ring);
+  }}
+}}
+
+if (BUILDINGS.length) {{
+  let buildingIndex = 0;
   for (const building of BUILDINGS) {{
     const outerForExtrude = building.outer.map(([x, z]) => [x, -z]);
     const holesForExtrude = (building.holes || []).map((ring) => ring.map(([x, z]) => [x, -z]));
@@ -2632,6 +3554,7 @@ if (BUILDINGS.length) {{
       if (holePath) shape.holes.push(holePath);
     }}
 
+    const heightValue = Math.max(2.8, building.height || 6.0);
     const geo = new THREE.ExtrudeGeometry(shape, {{
       depth: Math.max(2.8, building.height || 6.0),
       bevelEnabled: false,
@@ -2649,11 +3572,45 @@ if (BUILDINGS.length) {{
     pos.needsUpdate = true;
     geo.computeVertexNormals();
 
-    const mat = buildingMaterials[building.source_class] || buildingMaterials.other;
-    const mesh = new THREE.Mesh(geo, mat);
+    const wallMat = new THREE.MeshLambertMaterial({{
+      color: 0xd6c39a,
+      opacity: 0.88,
+      transparent: true
+    }});
+    const mesh = new THREE.Mesh(geo, wallMat);
     mesh.renderOrder = 3;
+    mesh.userData.surfaceType = 'wall';
+    mesh.userData.paletteSeed = buildingIndex + hashString(building.source_class || building.source || 'other');
     buildingLayer.add(mesh);
+
+    const roofGeo = new THREE.ShapeGeometry(shape);
+    const roofPos = roofGeo.attributes.position;
+    for (let i = 0; i < roofPos.count; i++) {{
+      const x = roofPos.getX(i);
+      const z = -roofPos.getY(i);
+      const y = sampleTerrainHeight(x, z) + 0.20 + heightValue;
+      roofPos.setXYZ(i, x, y, z);
+    }}
+    roofPos.needsUpdate = true;
+    roofGeo.computeVertexNormals();
+
+    const roofMat = new THREE.MeshStandardMaterial({{
+      color: 0x9b6b43,
+      emissive: 0x3a2418,
+      roughness: 0.72,
+      metalness: 0.04,
+      opacity: 0.96,
+      transparent: true,
+      side: THREE.DoubleSide,
+    }});
+    const roofMesh = new THREE.Mesh(roofGeo, roofMat);
+    roofMesh.renderOrder = 4;
+    roofMesh.userData.surfaceType = 'roof';
+    roofMesh.userData.paletteSeed = buildingIndex + 11 + hashString(building.source_class || building.source || 'other');
+    buildingLayer.add(roofMesh);
+    buildingIndex += 1;
   }}
+  recolorBuildings();
 }}
 
 //  ZONAS VERDES (KML)
@@ -2791,6 +3748,13 @@ def main():
     print(f"  BBox: lon [{lon_min:.5f}, {lon_max:.5f}] | lat [{lat_min:.5f}, {lat_max:.5f}]")
     print(f"  Centro: lon={lon_center:.5f}, lat={lat_center:.5f}")
 
+    print("\n[2b] Leyendo estructuras hidraulicas ...")
+    raw_structures = []
+    raw_structures.extend(read_hydraulic_point_layer(TRAGANTES_SHP, "tragante", "S", "F", lon_min, lat_min, lon_max, lat_max))
+    raw_structures.extend(read_hydraulic_point_layer(CRP_SHP, "crp", "S (altura)", "F (fondo)", lon_min, lat_min, lon_max, lat_max))
+    raw_structures.extend(read_hydraulic_point_layer(CRN_SHP, "crn", "S(altura)", "F(fondo)", lon_min, lat_min, lon_max, lat_max))
+    print(f"  Estructuras puntuales encontradas: {len(raw_structures)}")
+
     # ── 3. Curvas de nivel WFS ───────────────────────────────
     print("\n[3] Descargando curvas de nivel IGN WFS ...")
     contours_dict = {}
@@ -2803,8 +3767,18 @@ def main():
         print("  Saltando WFS (requests no disponible).")
 
     # ── 4. Construir DEM ────────────────────────────────────
-    print("\n[4] Construyendo DEM con IDW ...")
-    dem, lons, lats = build_dem(gps_routes, contours_dict, lon_min, lat_min, lon_max, lat_max)
+    print("\n[4] Construyendo DEM preliminar con IDW ...")
+    dem_pre, lons, lats = build_dem(gps_routes, contours_dict, lon_min, lat_min, lon_max, lat_max)
+
+    print("\n[4b] Clasificando cotas de estructuras ...")
+    hydraulic_structures = classify_hydraulic_structures(raw_structures, dem_pre, lons, lats)
+    dem_control_points = structures_to_dem_control_points(hydraulic_structures)
+
+    print("\n[4c] Reconstruyendo DEM final con puntos hidraulicos ...")
+    dem, lons, lats = build_dem(
+        gps_routes, contours_dict, lon_min, lat_min, lon_max, lat_max,
+        extra_control_points=dem_control_points
+    )
 
     # ── 5. Textura satelital ────────────────────────────────
     print("\n[5] Descargando textura satelital ...")
@@ -2828,7 +3802,6 @@ def main():
     # ── 6. Preparar datos 3D ────────────────────────────────
     print("\n[6] Preparando datos 3D ...")
     dem_data    = prepare_dem_for_threejs(dem, lons, lats, lon_center, lat_center)
-    hydrology_data = build_flow_hydrology(dem, lons, lats, lat_center)
     # Curvas → visibles en 3D | Rutas GPS → solo DEM
     contours_3d = contours_to_threejs(contours_dict, lon_center, lat_center, dem, lons, lats)
 
@@ -2843,10 +3816,17 @@ def main():
     raw_rivers = read_cauce_rivers(CAUCE_SHP, lon_min, lat_min, lon_max, lat_max)
     rivers_3d  = rivers_to_threejs(raw_rivers, lon_center, lat_center, dem, lons, lats)
 
-    # Puntos de desfogue (OSM KML)
-    print("\n[6c] Leyendo puntos de desfogue (OSM KML) ...")
-    raw_drain_pts  = read_osm_kml_points(OSM_KML, lon_min, lat_min, lon_max, lat_max)
-    drainage_pts_3d = drainage_points_to_threejs(raw_drain_pts, lon_center, lat_center, dem, lons, lats)
+    # Puntos de desfogue
+    print("\n[6c] Leyendo puntos de desfogue ...")
+    raw_drain_pts = read_desfogues_points(lon_min, lat_min, lon_max, lat_max)
+    for item in hydraulic_structures:
+        item["terrain_elev"] = sample_dem_value(dem, lons, lats, item["lon"], item["lat"])
+    for item in raw_drain_pts:
+        item["terrain_elev"] = sample_dem_value(dem, lons, lats, item["lon"], item["lat"])
+    drainage_pts_3d = drainage_points_to_threejs(
+        [(item["lon"], item["lat"], item.get("surface_raw") or item.get("terrain_elev") or 0.0, item.get("name", item["label"])) for item in raw_drain_pts],
+        lon_center, lat_center, dem, lons, lats
+    )
 
     # Zonas verdes (KML)
     print("\n[6d] Leyendo zonas verdes (KML) ...")
@@ -2858,8 +3838,21 @@ def main():
     raw_streets = download_osm_streets(lon_min, lat_min, lon_max, lat_max)
     streets_3d = streets_to_threejs(raw_streets, lon_center, lat_center, dem, lons, lats)
 
+    print("\n[6f] Armando red hidraulica preliminar ...")
+    hydraulic_links = build_hydraulic_network(hydraulic_structures, raw_drain_pts, raw_streets)
+    surface_sinks = [
+        {"id": item["id"], "lon": item["lon"], "lat": item["lat"]}
+        for item in hydraulic_structures if item["kind"] == "tragante"
+    ] + [
+        {"id": item["id"], "lon": item["lon"], "lat": item["lat"]}
+        for item in raw_drain_pts
+    ]
+    hydrology_data = build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=surface_sinks)
+    hydraulic_nodes_3d = hydraulic_nodes_to_threejs(hydraulic_structures, lon_center, lat_center, dem, lons, lats, hydrology_data)
+    hydraulic_links_3d = hydraulic_links_to_threejs(hydraulic_links, lon_center, lat_center, dem, lons, lats)
+
     # Open Buildings / huellas de edificios
-    print("\n[6f] Leyendo Open Buildings ...")
+    print("\n[6g] Leyendo Open Buildings ...")
     raw_buildings = read_open_buildings_geojson(OPEN_BUILDINGS_GEOJSON, lon_min, lat_min, lon_max, lat_max)
     buildings_3d = buildings_to_threejs(raw_buildings, lon_center, lat_center)
 
@@ -2870,7 +3863,7 @@ def main():
     # ── 8. Generar HTML ─────────────────────────────────────
     print("\n[8] Generando HTML ...")
     html_content = make_html(
-        dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, green_zones_2d, streets_3d, buildings_3d,
+        dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, buildings_3d,
         tex_b64, catastro_b64, vendor_js, lon_center, lat_center
     )
 
