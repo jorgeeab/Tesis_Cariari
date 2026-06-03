@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zanja Infiltrante | Guia SBNS</title>
+<link rel="stylesheet" href="./sbns_sim.css">
+</head>
+<body>
+  <main class="page">
+    <div class="topbar">
+      <a class="back-link" href="./index.html">Volver a la guia SBNS</a>
+      <div class="top-actions">
+        <a class="action-link primary" href="../Refinado_30_ThreeJS_Cortina_Ajustada.html" target="_blank" rel="noopener noreferrer">Abrir terreno 3D</a>
+        <a class="action-link" href="#simulador">Ir al simulador</a>
+      </div>
+    </div>
+
+    <section class="hero-card">
+      <div class="eyebrow">SBNS | Solucion 03</div>
+      <h1>Zanja infiltrante</h1>
+      <p class="lead">
+        Simulacion conceptual para una zanja infiltrante rellena con grava. El modulo estima almacenamiento
+        en vacios, infiltracion por paredes y fondo, y compara la capacidad del sistema contra el evento de lluvia.
+      </p>
+      <div class="thesis-mark">
+        <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true">
+          <path fill="#285f45" d="M12 3 2 8l10 5 8-4v7h2V8L12 3Zm-6 8v7h12v-7l-6 3-6-3Zm-2 9h16v2H4v-2Z"/>
+        </svg>
+        <div>
+          <strong>Producto de tesis universitaria</strong>
+          <span>Herramienta academica para revisar la capacidad conceptual de una zanja infiltrante.</span>
+        </div>
+      </div>
+      <div class="hero-actions">
+        <a class="action-link primary" href="#simulador">Explorar parametros</a>
+      </div>
+      <div class="hero-meta">
+        <div class="mini-chip"><strong>Funcion</strong><span>Captar e infiltrar</span></div>
+        <div class="mini-chip"><strong>Escala</strong><span>Linea de borde</span></div>
+        <div class="mini-chip"><strong>Geometria</strong><span>Rectangular rellena</span></div>
+        <div class="mini-chip"><strong>Mecanismo</strong><span>Vacios y paredes activas</span></div>
+      </div>
+    </section>
+
+    <section class="panel" id="simulador">
+      <h2 class="section-title">Parametros de entrada</h2>
+      <p class="section-copy">Ajusta la seccion y longitud de la zanja, la porosidad del relleno y las condiciones de infiltracion.</p>
+      <div class="controls-grid" id="controls-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="status-strip">
+        <div>
+          <h2 class="section-title">Diagnostico del sistema</h2>
+          <p class="status-copy" id="status-copy">Evaluacion instantanea del evento seleccionado.</p>
+        </div>
+        <div class="status-badge" id="status-badge">Calculando</div>
+      </div>
+
+      <section class="stat-grid">
+        <div class="stat">
+          <div class="stat-label">Volumen de escorrentia</div>
+          <div class="stat-value" id="stat-vesc">0 m3</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Volumen util</div>
+          <div class="stat-value" id="stat-vutil">0 m3</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Capacidad total</div>
+          <div class="stat-value" id="stat-vcap">0 m3</div>
+        </div>
+        <div class="stat" id="balance-card">
+          <div class="stat-label">Balance</div>
+          <div class="stat-value" id="stat-balance">0 m3</div>
+        </div>
+      </section>
+    </section>
+
+    <section class="panel">
+      <div class="diagram-shell">
+        <p class="diagram-caption">Seccion conceptual de la zanja infiltrante</p>
+        <div class="section-svg-wrap">
+          <svg id="section-svg" viewBox="0 0 900 420" preserveAspectRatio="xMidYMid meet" aria-label="Seccion conceptual de zanja infiltrante"></svg>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="equation-shell">
+        <p class="diagram-caption">Calculos principales</p>
+        <div class="equation-list" id="equation-list"></div>
+      </div>
+    </section>
+
+    <section class="chart-stack">
+      <article class="chart-card">
+        <h2 class="section-title">Respuesta temporal</h2>
+        <p class="section-copy">Se representa el llenado del volumen util y la infiltracion acumulada durante el evento.</p>
+        <div class="chart-shell">
+          <svg id="timeline-chart" viewBox="0 0 560 300" preserveAspectRatio="xMidYMid meet" aria-label="Grafico de respuesta temporal"></svg>
+        </div>
+        <div class="legend">
+          <span class="legend-item"><span class="legend-swatch" style="background: rgba(127, 182, 217, 0.55);"></span>Almacenamiento</span>
+          <span class="legend-item"><span class="legend-swatch" style="background: #2f6f4f;"></span>Infiltracion acumulada</span>
+        </div>
+      </article>
+
+      <article class="chart-card">
+        <h2 class="section-title">Indicadores</h2>
+        <p class="section-copy">La comparacion resume ocupacion, eficiencia, reduccion del pico y vaciado aproximado.</p>
+        <div class="chart-shell">
+          <svg id="indicator-chart" viewBox="0 0 560 300" preserveAspectRatio="xMidYMid meet" aria-label="Grafico de indicadores"></svg>
+        </div>
+        <div class="legend">
+          <span class="legend-item"><span class="legend-swatch" style="background: #7fb6d9;"></span>Relacion de area</span>
+          <span class="legend-item"><span class="legend-swatch" style="background: #7cb57a;"></span>Eficiencia</span>
+          <span class="legend-item"><span class="legend-swatch" style="background: #d8b263;"></span>Reduccion del pico</span>
+          <span class="legend-item"><span class="legend-swatch" style="background: #8f88c9;"></span>Tiempo de vaciado</span>
+        </div>
+      </article>
+    </section>
+
+    <div class="note-card">
+      <strong>Nota:</strong> esta version representa una zanja rectangular simplificada. En obra deben verificarse geotextiles, colmatacion, separaciones y rebose seguro.
+    </div>
+  </main>
+
+  <script src="./sbns_sim.js"></script>
+  <script>
+    const controlConfig = [
+      { key: "A", label: "Area aportante (m2)", min: 50, max: 8000, step: 10, value: 1000 },
+      { key: "C", label: "Coeficiente de escorrentia", min: 0.1, max: 1, step: 0.01, value: 0.85 },
+      { key: "i", label: "Intensidad de lluvia (mm/h)", min: 10, max: 250, step: 1, value: 90 },
+      { key: "t", label: "Duracion del evento (min)", min: 5, max: 180, step: 1, value: 30 },
+      { key: "ancho", label: "Ancho de zanja (m)", min: 0.3, max: 4, step: 0.05, value: 1.2 },
+      { key: "largo", label: "Longitud de zanja (m)", min: 1, max: 50, step: 0.5, value: 15 },
+      { key: "prof", label: "Profundidad util (m)", min: 0.2, max: 3, step: 0.05, value: 1.1 },
+      { key: "nVoid", label: "Porosidad del relleno", min: 0.1, max: 0.5, step: 0.01, value: 0.35 },
+      { key: "f", label: "Infiltracion del suelo (mm/h)", min: 1, max: 150, step: 1, value: 25 },
+      { key: "n", label: "Numero de zanjas", min: 1, max: 6, step: 1, value: 1 },
+      { key: "FS", label: "Factor de seguridad", min: 1, max: 2, step: 0.01, value: 1.15 }
+    ];
+
+    const state = Object.fromEntries(controlConfig.map((item) => [item.key, item.value]));
+
+    function calculate() {
+      const i_mh = state.i / 1000;
+      const t_h = state.t / 60;
+      const Vll = state.A * i_mh * t_h;
+      const Vesc = Vll * state.C * state.FS;
+      const Qp = (state.C * state.i * (state.A / 10000)) / 360;
+      const VutilUno = state.ancho * state.largo * state.prof * state.nVoid;
+      const Vutil = VutilUno * state.n;
+      const areaFondo = state.ancho * state.largo;
+      const areaParedes = 2 * state.prof * state.largo;
+      const areaInfilUno = areaFondo + areaParedes;
+      const areaInfil = areaInfilUno * state.n;
+      const Vinf = areaInfil * (state.f / 1000) * t_h;
+      const Vcap = Vutil + Vinf;
+      const balance = Vcap - Vesc;
+      const cumple = balance >= 0;
+      const relacionArea = ((areaFondo * state.n) / state.A) * 100;
+      const eficiencia = sbnsClamp((Vcap / Math.max(Vesc, 1e-9)) * 100, 0, 300);
+      const reduccionPico = sbnsClamp((Vutil / Math.max(Vesc, 1e-9)) * 100 * 0.52, 0, 95);
+      const vaciado = state.f > 0 ? Vutil / Math.max(areaInfil * (state.f / 1000), 1e-9) : Infinity;
+
+      const steps = 24;
+      const series = Array.from({ length: steps + 1 }, (_, index) => {
+        const frac = index / steps;
+        return {
+          minute: frac * state.t,
+          infiltration: Vinf * frac,
+          storage: sbnsClamp((Vesc * frac) - (Vinf * frac), 0, Vutil)
+        };
+      });
+
+      return { Vesc, Qp, Vutil, areaFondo, areaParedes, areaInfil, Vinf, Vcap, balance, cumple, relacionArea, eficiencia, reduccionPico, vaciado, series };
+    }
+
+    function renderSummary(data) {
+      sbnsSetText("stat-vesc", `${sbnsFmt(data.Vesc)} m3`);
+      sbnsSetText("stat-vutil", `${sbnsFmt(data.Vutil)} m3`);
+      sbnsSetText("stat-vcap", `${sbnsFmt(data.Vcap)} m3`);
+      sbnsSetText("stat-balance", `${sbnsFmt(data.balance)} m3`);
+
+      const badge = document.getElementById("status-badge");
+      const copy = document.getElementById("status-copy");
+      const balanceCard = document.getElementById("balance-card");
+
+      if (data.cumple) {
+        badge.textContent = "Cumple para el evento";
+        badge.className = "status-badge good";
+        balanceCard.className = "stat status-good";
+        copy.textContent = "La capacidad util e infiltrante de la zanja supera el volumen de escorrentia del evento.";
+      } else {
+        badge.textContent = "No cumple para el evento";
+        badge.className = "status-badge bad";
+        balanceCard.className = "stat status-bad";
+        copy.textContent = "La zanja requiere mas volumen disponible, mayor longitud o mejores condiciones de infiltracion.";
+      }
+    }
+
+    function renderSection(data) {
+      const svg = document.getElementById("section-svg");
+      const VW = 900;
+      const VH = 420;
+      const centerX = 470;
+      const infoX = 110;
+      const rightX = 650;
+      const scaleX = Math.min(280 / Math.max(state.ancho, 0.1), 190);
+      const scaleY = Math.min(220 / Math.max(state.prof, 0.1), 180);
+      const width = state.ancho * scaleX;
+      const depth = state.prof * scaleY;
+      const x0 = centerX - width / 2;
+      const yTop = 110;
+      const waterCap = 24;
+
+      svg.innerHTML = `
+        <rect x="0" y="0" width="${VW}" height="${VH}" rx="18" fill="#fffdf7" stroke="rgba(34,49,40,0.08)"></rect>
+        <rect x="40" y="24" width="820" height="372" rx="28" fill="rgba(255,253,247,0.78)" stroke="rgba(34,49,40,0.08)"></rect>
+        <rect x="${x0}" y="${yTop}" width="${width}" height="${depth}" fill="${sbnsGetCssVar("--gravel")}" stroke="#59626a" stroke-width="1.5"></rect>
+        <rect x="${x0}" y="${yTop - waterCap}" width="${width}" height="${waterCap}" fill="${sbnsGetCssVar("--water")}" fill-opacity="0.78" stroke="#225b82" stroke-width="1.5"></rect>
+        <line x1="${x0 - 16}" y1="${yTop + depth}" x2="${x0 + width + 16}" y2="${yTop + depth}" stroke="#36453c" stroke-width="2"></line>
+        <line x1="${x0}" y1="${yTop - 38}" x2="${x0 + width}" y2="${yTop - 38}" stroke="#1d2a22" stroke-width="1.5"></line>
+        <line x1="${x0 + width + 20}" y1="${yTop}" x2="${x0 + width + 20}" y2="${yTop + depth}" stroke="#1d2a22" stroke-width="1.5"></line>
+        <text x="${centerX}" y="${yTop - 48}" text-anchor="middle" font-size="14" fill="#223128">Ancho = ${sbnsFmt(state.ancho)} m</text>
+        <text x="${rightX}" y="${yTop + depth / 2}" font-size="14" fill="#223128">Prof. = ${sbnsFmt(state.prof)} m</text>
+        <text x="${infoX}" y="105" font-size="13" fill="#5c6d63">Longitud = ${sbnsFmt(state.largo)} m</text>
+        <text x="${infoX}" y="138" font-size="13" fill="#5c6d63">Porosidad = ${sbnsFmt(state.nVoid)}</text>
+        <text x="${infoX}" y="171" font-size="13" fill="#5c6d63">Numero = ${sbnsFmt(state.n, 0)}</text>
+        <text x="${infoX}" y="204" font-size="13" fill="#5c6d63">f = ${sbnsFmt(state.f)} mm/h</text>
+        <text x="${rightX}" y="${yTop + 18}" font-size="13" fill="#223128">Agua temporal</text>
+        <text x="${rightX}" y="${yTop + depth / 2 + 34}" font-size="13" fill="#223128">Relleno drenante</text>
+      `;
+    }
+
+    function renderEquations(data) {
+      sbnsRenderEquations("equation-list", [
+        { title: "Caudal pico", expr: `Qp = C * i * A / 360 = ${sbnsFmt(data.Qp, 3)} m3/s` },
+        { title: "Volumen de escorrentia", expr: `Vesc = A * i * t * C * FS = ${sbnsFmt(data.Vesc)} m3` },
+        { title: "Volumen util", expr: `Vutil = ancho * largo * prof * n = ${sbnsFmt(data.Vutil)} m3` },
+        { title: "Area de fondo", expr: `Af = ancho * largo = ${sbnsFmt(data.areaFondo)} m2` },
+        { title: "Area de paredes", expr: `Ap = 2 * prof * largo = ${sbnsFmt(data.areaParedes)} m2` },
+        { title: "Area infiltrante", expr: `Ainf = Af + Ap = ${sbnsFmt(data.areaInfil)} m2` },
+        { title: "Infiltracion en evento", expr: `Vinf = Ainf * f * t = ${sbnsFmt(data.Vinf)} m3` },
+        { title: "Balance", expr: `DV = (Vutil + Vinf) - Vesc = ${sbnsFmt(data.balance)} m3` }
+      ]);
+    }
+
+    function renderCharts(data) {
+      sbnsRenderTimeline("timeline-chart", data.series, {
+        maxX: state.t,
+        storage: (item) => item.storage,
+        line: (item) => item.infiltration
+      });
+
+      sbnsRenderIndicatorBars("indicator-chart", [
+        { label: "Area", value: Math.min(data.relacionArea, 100), raw: `${sbnsFmt(data.relacionArea)} %`, color: "#7fb6d9" },
+        { label: "Efic.", value: Math.min(data.eficiencia, 100), raw: `${sbnsFmt(data.eficiencia)} %`, color: "#7cb57a" },
+        { label: "Pico", value: Math.min(data.reduccionPico, 100), raw: `${sbnsFmt(data.reduccionPico)} %`, color: "#d8b263" },
+        { label: "Vaciado", value: Math.min(data.vaciado * 5, 100), raw: `${sbnsFmt(data.vaciado)} h`, color: "#8f88c9" }
+      ]);
+    }
+
+    function update() {
+      const data = calculate();
+      renderSummary(data);
+      renderSection(data);
+      renderEquations(data);
+      renderCharts(data);
+    }
+
+    sbnsCreateControls("controls-grid", controlConfig, state, update);
+    update();
+  </script>
+</body>
+</html>

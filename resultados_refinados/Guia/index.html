@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Guia Visual SBNS</title>
+<style>
+  :root {
+    --bg: #f6f2e9;
+    --panel: rgba(255, 253, 247, 0.9);
+    --text: #243127;
+    --muted: #5d6a5f;
+    --line: rgba(36, 49, 39, 0.12);
+    --brand: #21563d;
+    --brand-soft: #cde4bb;
+    --accent: #9fcadd;
+    --shadow: 0 22px 56px rgba(42, 58, 46, 0.14);
+    --radius: 28px;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    font-family: "Segoe UI", Arial, sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(circle at top left, rgba(159, 202, 221, 0.62), transparent 30%),
+      radial-gradient(circle at bottom right, rgba(205, 228, 187, 0.8), transparent 32%),
+      linear-gradient(180deg, #faf7f0 0%, #f2ecdf 100%);
+    min-height: 100vh;
+  }
+
+  .page {
+    width: min(1200px, calc(100% - 32px));
+    margin: 0 auto;
+    padding: 34px 0 46px;
+  }
+
+  .hero {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 24px;
+    margin-bottom: 24px;
+  }
+
+  .hero-copy,
+  .hero-side,
+  .catalog,
+  .detail {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(10px);
+  }
+
+  .hero-copy {
+    padding: 36px;
+  }
+
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: rgba(205, 228, 187, 0.55);
+    color: var(--brand);
+    font-size: 0.9rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  h1 {
+    margin: 18px 0 14px;
+    font-size: clamp(2.4rem, 5vw, 4.6rem);
+    line-height: 0.94;
+  }
+
+  .lead {
+    margin: 0;
+    max-width: 60ch;
+    color: var(--muted);
+    line-height: 1.75;
+    font-size: 1.04rem;
+  }
+
+  .hero-side {
+    padding: 26px;
+    display: grid;
+    gap: 16px;
+    align-content: center;
+  }
+
+  .mini-card {
+    padding: 18px;
+    border-radius: 22px;
+    background: rgba(255, 255, 255, 0.72);
+    border: 1px solid rgba(36, 49, 39, 0.08);
+  }
+
+  .mini-card strong {
+    display: block;
+    margin-bottom: 6px;
+  }
+
+  .mini-card p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 0.92fr 1.08fr;
+    gap: 24px;
+  }
+
+  .catalog,
+  .detail {
+    padding: 28px;
+  }
+
+  .section-title {
+    margin: 0 0 8px;
+    font-size: 1.45rem;
+  }
+
+  .section-copy {
+    margin: 0 0 18px;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+
+  .cards {
+    display: grid;
+    gap: 14px;
+  }
+
+  .card {
+    width: 100%;
+    text-align: left;
+    padding: 20px;
+    border-radius: 22px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.75);
+    cursor: pointer;
+    transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+  }
+
+  .card:hover,
+  .card.active {
+    transform: translateY(-2px);
+    border-color: rgba(33, 86, 61, 0.28);
+    background: rgba(205, 228, 187, 0.42);
+  }
+
+  .card.disabled {
+    opacity: 0.7;
+  }
+
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 8px;
+  }
+
+  .card h3 {
+    margin: 0;
+    font-size: 1.08rem;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    background: rgba(33, 86, 61, 0.1);
+    color: var(--brand);
+  }
+
+  .card p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  .detail {
+    display: grid;
+    gap: 18px;
+  }
+
+  .detail-image {
+    width: 100%;
+    height: 300px;
+    object-fit: cover;
+    border-radius: 24px;
+    border: 1px solid rgba(36, 49, 39, 0.08);
+  }
+
+  .detail-visual {
+    min-height: 250px;
+    border-radius: 24px;
+    border: 1px solid rgba(36, 49, 39, 0.08);
+    background:
+      linear-gradient(180deg, rgba(159, 202, 221, 0.62) 0 30%, rgba(248, 245, 238, 0.9) 30% 100%);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .detail-visual::before,
+  .detail-visual::after {
+    content: "";
+    position: absolute;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.42);
+  }
+
+  .detail-visual::before {
+    width: 240px;
+    height: 240px;
+    top: -60px;
+    right: -40px;
+  }
+
+  .detail-visual::after {
+    width: 180px;
+    height: 180px;
+    left: -30px;
+    bottom: -40px;
+  }
+
+  .pond,
+  .soil,
+  .gravel,
+  .plant {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 70%;
+    border-radius: 18px;
+  }
+
+  .pond {
+    top: 72px;
+    height: 44px;
+    background: rgba(88, 162, 210, 0.78);
+  }
+
+  .soil {
+    top: 118px;
+    height: 68px;
+    background: linear-gradient(180deg, #8e6d57, #6d523f);
+  }
+
+  .gravel {
+    top: 184px;
+    height: 30px;
+    background: linear-gradient(180deg, #c2c7cb, #9ea5ac);
+  }
+
+  .plant {
+    top: 24px;
+    height: 50px;
+    width: 56%;
+    background: linear-gradient(180deg, rgba(79, 136, 72, 0.95), rgba(79, 136, 72, 0));
+    clip-path: polygon(0 100%, 8% 44%, 14% 100%, 24% 20%, 30% 100%, 40% 12%, 47% 100%, 58% 28%, 66% 100%, 78% 18%, 84% 100%, 100% 100%);
+  }
+
+  .detail-panel {
+    padding: 22px;
+    border-radius: 22px;
+    background: rgba(255, 255, 255, 0.72);
+    border: 1px solid rgba(36, 49, 39, 0.08);
+  }
+
+  .detail-panel h2 {
+    margin-top: 0;
+    margin-bottom: 10px;
+  }
+
+  .detail-panel p {
+    margin: 0 0 16px;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+
+  .detail-panel ul {
+    margin: 0 0 22px;
+    padding-left: 20px;
+    color: var(--muted);
+    line-height: 1.8;
+  }
+
+  .cta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .cta,
+  .cta-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px 18px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    text-decoration: none;
+    transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+  }
+
+  .cta {
+    background: var(--brand);
+    color: #f7fff7;
+    border-color: transparent;
+  }
+
+  .cta-secondary {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.75);
+  }
+
+  .cta:hover,
+  .cta-secondary:hover {
+    transform: translateY(-2px);
+  }
+
+  .cta[aria-disabled="true"] {
+    background: #aab7af;
+    pointer-events: none;
+  }
+
+  @media (max-width: 940px) {
+    .hero,
+    .layout {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .page {
+      width: min(100% - 20px, 1200px);
+      padding-top: 20px;
+    }
+
+    .hero-copy,
+    .hero-side,
+    .catalog,
+    .detail {
+      padding-left: 20px;
+      padding-right: 20px;
+    }
+
+    h1 {
+      font-size: 2.5rem;
+    }
+  }
+</style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow">Guia Visual | SBNS</div>
+        <h1>Sistemas basados en la naturaleza para leer, comparar y explorar</h1>
+        <p class="lead">
+          Esta portada funciona como menu inicial. Selecciona una estrategia y entra a su ficha visual.
+          Ya quedan activas <strong>Jardin de lluvia</strong>, <strong>Cuneta verde</strong>,
+          <strong>Zanja infiltrante</strong>, <strong>Pavimento permeable</strong> y
+          <strong>Pozos de infiltracion</strong>, todas conectadas con tu modelo 3D del sitio.
+        </p>
+      </div>
+    </section>
+
+    <section class="layout">
+      <article class="catalog">
+        <h2 class="section-title">Seleccion de soluciones</h2>
+        <p class="section-copy">Haz clic en una tarjeta para ver su descripcion. Todas las opciones visibles ya se pueden abrir.</p>
+
+        <div class="cards" id="solution-list">
+          <button class="card active" type="button" data-solution="jardin">
+            <div class="card-head">
+              <h3>Jardines de lluvia</h3>
+              <span class="badge">Disponible</span>
+            </div>
+            <p>Captan, retienen e infiltran escorrentia en una celda vegetada de poca profundidad.</p>
+          </button>
+
+          <button class="card" type="button" data-solution="cuneta">
+            <div class="card-head">
+              <h3>Cuneta verde</h3>
+              <span class="badge">Disponible</span>
+            </div>
+            <p>Canal vegetado de baja profundidad para conducir, retener e infiltrar escorrentia.</p>
+          </button>
+
+          <button class="card" type="button" data-solution="zanja">
+            <div class="card-head">
+              <h3>Zanja infiltrante</h3>
+              <span class="badge">Disponible</span>
+            </div>
+            <p>Elemento lineal relleno que almacena agua en vacios y la infiltra por fondo y paredes.</p>
+          </button>
+
+          <button class="card" type="button" data-solution="pavimento">
+            <div class="card-head">
+              <h3>Pavimento permeable</h3>
+              <span class="badge">Disponible</span>
+            </div>
+            <p>Paquete superficial que drena hacia un reservorio granular y descarga gradualmente al suelo.</p>
+          </button>
+
+          <button class="card" type="button" data-solution="pozos">
+            <div class="card-head">
+              <h3>Pozos de infiltracion</h3>
+              <span class="badge">Disponible</span>
+            </div>
+            <p>Solucion puntual que concentra almacenamiento y percolacion en elementos cilindricos enterrados.</p>
+          </button>
+        </div>
+      </article>
+
+      <article class="detail">
+        <img id="detail-image" class="detail-image" src="" alt="Ilustracion de la solucion">
+
+        <div class="detail-panel">
+          <h2 id="detail-title">Jardines de lluvia</h2>
+          <p id="detail-copy">
+            Solucion puntual y muy legible para explicar el manejo de escorrentia en espacios urbanos o de borde.
+          </p>
+          <ul id="detail-list"></ul>
+          <div class="cta-row">
+            <a class="cta" id="detail-link" href="./Jardin_Lluvia.html">Entrar a esta guia</a>
+            <a class="cta-secondary" href="../Refinado_30_ThreeJS_Cortina_Ajustada.html" target="_blank" rel="noopener noreferrer">Abrir terreno 3D</a>
+          </div>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const solutions = {
+      jardin: {
+        title: "Jardines de lluvia",
+        copy: "Solucion puntual y muy legible para explicar el manejo de escorrentia en espacios urbanos o de borde.",
+        items: [
+          "Adecuado para mostrar captacion, almacenamiento temporal e infiltracion.",
+          "Combina agua, suelo, vegetacion y rebose en una narrativa facil de visualizar.",
+          "Ya tiene una pagina propia y enlace al modelo 3D del sitio."
+        ],
+        href: "./Jardin_Lluvia.html",
+        available: true
+      },
+      cuneta: {
+        title: "Cuneta verde",
+        copy: "Solucion lineal y muy util para bordes viales, con capacidad de conduccion, almacenamiento e infiltracion.",
+        items: [
+          "Funciona bien para explicar seccion trapezoidal, pendiente y vaciado del sistema.",
+          "Permite relacionar el borde vial con la gestion de escorrentia en superficie.",
+          "Ya tiene pagina propia y enlace al visor 3D."
+        ],
+        href: "./Cuneta_Verde.html",
+        available: true
+      },
+      zanja: {
+        title: "Zanja infiltrante",
+        copy: "Solucion lineal enterrada o semienterrada para almacenar agua en vacios y promover infiltracion distribuida.",
+        items: [
+          "Comparte con la cuneta una lectura longitudinal, pero trabaja con una cavidad rellena y no con una depresion vegetada.",
+          "Permite revisar volumen util, area infiltrante y tiempo de vaciado.",
+          "Ya tiene pagina propia y usa la misma configuracion visual del sistema."
+        ],
+        href: "./Zanja_Infiltrante.html",
+        available: true
+      },
+      pavimento: {
+        title: "Pavimento permeable",
+        copy: "Solucion superficial para laminar escorrentia y almacenarla temporalmente en una subbase drenante.",
+        items: [
+          "Integra lluvia, area tributaria, vacios y criterio estructural por tipo de carga.",
+          "Su seccion por capas hace facil comparar superficie, asiento y reservorio.",
+          "Ya tiene pagina propia con la misma logica de simulacion."
+        ],
+        href: "./Pavimento_Permeable.html",
+        available: true
+      },
+      pozos: {
+        title: "Pozos de infiltracion",
+        copy: "Solucion puntual para captar agua, almacenarla en volumen util e infiltrar por paredes y fondo.",
+        items: [
+          "Permite ajustar diametro, profundidad, numero de pozos y fondo activo.",
+          "Ayuda a comparar volumen util versus area infiltrante total.",
+          "Ya tiene pagina propia con la misma configuracion visual del resto."
+        ],
+        href: "./Pozos_Infiltracion.html",
+        available: true
+      }
+    };
+
+    const buttons = Array.from(document.querySelectorAll(".card"));
+    const title = document.getElementById("detail-title");
+    const copy = document.getElementById("detail-copy");
+    const list = document.getElementById("detail-list");
+    const link = document.getElementById("detail-link");
+
+    function renderSolution(key) {
+      const solution = solutions[key];
+      title.textContent = solution.title;
+      copy.textContent = solution.copy;
+      list.innerHTML = solution.items.map((item) => `<li>${item}</li>`).join("");
+      link.textContent = solution.available ? "Entrar a esta guia" : "Disponible proximamente";
+      link.href = solution.available ? solution.href : "#";
+      link.setAttribute("aria-disabled", solution.available ? "false" : "true");
+
+      const img = document.getElementById("detail-image");
+      if (img) img.src = "images/" + key + ".png";
+
+      buttons.forEach((button) => {
+        button.classList.toggle("active", button.dataset.solution === key);
+      });
+    }
+
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => renderSolution(button.dataset.solution));
+    });
+
+    renderSolution("jardin");
+  </script>
+</body>
+</html>

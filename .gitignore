@@ -2,6 +2,13 @@
 __pycache__/
 *.pyc
 
-# GIS source data and generated outputs stay local.
+# GIS source data and caches stay local (demasiado grandes para git)
 Arcgis shapes y curvas/
-resultados_refinados/
+resultados_refinados/_cache_*/
+resultados_refinados/_vendor_*/
+resultados_refinados/*.geojson
+resultados_refinados/*.json
+resultados_refinados/*.html
+resultados_refinados/*.png
+# La Guia SbN sí va a git (contenido de la web)
+!resultados_refinados/Guia/

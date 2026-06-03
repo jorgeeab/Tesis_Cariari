@@ -1,0 +1,17 @@
+[Unit]
+Description=Guia SbN Cariari – FastAPI
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/var/www/tesis-cariari
+ExecStart=/var/www/tesis-cariari/.venv/bin/gunicorn app:app \
+    -w 2 \
+    -k uvicorn.workers.UvicornWorker \
+    --bind 127.0.0.1:8010
+Restart=on-failure
+Environment="ROOT_PATH=/sbn"
+
+[Install]
+WantedBy=multi-user.target
