@@ -8,10 +8,11 @@ from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = Path(__file__).resolve().parent
 RESULTADOS_DIR = BASE_DIR / "resultados_refinados"
-GUIA_INDEX = "/resultados_refinados/Guia/index.html"
+_GUIA_PATH = "/resultados_refinados/Guia/index.html"
 
 # ROOT_PATH allows running under a subpath proxy (e.g. nginx /sbn → this app)
-ROOT_PATH = os.getenv("ROOT_PATH", "")
+ROOT_PATH = os.getenv("ROOT_PATH", "").rstrip("/")
+GUIA_INDEX = ROOT_PATH + _GUIA_PATH
 
 app = FastAPI(title="Guia SBNS Cariari", root_path=ROOT_PATH)
 
