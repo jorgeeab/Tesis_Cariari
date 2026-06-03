@@ -8,7 +8,7 @@ resultados_refinados/_cache_*/
 resultados_refinados/_vendor_*/
 resultados_refinados/*.geojson
 resultados_refinados/*.json
-resultados_refinados/*.html
 resultados_refinados/*.png
-# La Guia SbN sí va a git (contenido de la web)
+# La Guia SbN y el mapa 3D sí van a git
 !resultados_refinados/Guia/
+!resultados_refinados/Refinado_30_ThreeJS_Cortina_Ajustada.html

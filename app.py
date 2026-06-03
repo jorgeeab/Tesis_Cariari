@@ -8,11 +8,13 @@ from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = Path(__file__).resolve().parent
 RESULTADOS_DIR = BASE_DIR / "resultados_refinados"
-_GUIA_PATH = "/resultados_refinados/Guia/index.html"
+_GUIA_PATH  = "/resultados_refinados/Guia/index.html"
+_MAPA3D_PATH = "/resultados_refinados/Refinado_30_ThreeJS_Cortina_Ajustada.html"
 
 # ROOT_PATH allows running under a subpath proxy (e.g. nginx /sbn → this app)
 ROOT_PATH = os.getenv("ROOT_PATH", "").rstrip("/")
-GUIA_INDEX = ROOT_PATH + _GUIA_PATH
+GUIA_INDEX  = ROOT_PATH + _GUIA_PATH
+MAPA3D_URL  = ROOT_PATH + _MAPA3D_PATH
 
 app = FastAPI(title="Guia SBNS Cariari")
 
@@ -26,6 +28,12 @@ def root() -> RedirectResponse:
 @app.get("/guia/", include_in_schema=False)
 def guia() -> RedirectResponse:
     return RedirectResponse(url=GUIA_INDEX, status_code=307)
+
+
+@app.get("/mapa3d", include_in_schema=False)
+@app.get("/mapa3d/", include_in_schema=False)
+def mapa3d() -> RedirectResponse:
+    return RedirectResponse(url=MAPA3D_URL, status_code=307)
 
 
 app.mount(
