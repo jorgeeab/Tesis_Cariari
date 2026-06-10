@@ -1,0 +1,131 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e4]:
+    - button "Capas" [ref=e5] [cursor=pointer]
+    - button "Leyenda" [ref=e6] [cursor=pointer]
+  - generic:
+    - heading "🏔 Cariari, Costa Rica" [level=2]
+    - generic: "Lat: 9.9729° | Lon: -84.1614°"
+    - generic: "Malla DEM: 220×220"
+    - generic: "Elev. mín: 881 m"
+    - generic: "Elev. máx: 1000 m"
+    - generic: "Ancho área: 2568 m"
+    - generic: "Alto área: 1903 m"
+    - generic: "Acum. máx flujo: 15811 celdas"
+    - generic: "Nodos hidráulicos: 359"
+    - generic: "Entradas/salidas superficiales: 227"
+    - generic: "Edificios 3D: 2838"
+    - generic: "Flechas visibles: 0"
+  - generic [ref=e7]:
+    - heading "Capas" [level=3] [ref=e8]
+    - generic [ref=e9]: Base
+    - generic [ref=e10] [cursor=pointer]:
+      - radio "Terreno simple" [checked] [ref=e11]
+      - text: Terreno simple
+    - generic [ref=e12] [cursor=pointer]:
+      - radio "Imagen satelital" [ref=e13]
+      - text: Imagen satelital
+    - generic [ref=e14] [cursor=pointer]:
+      - radio "Sin imagen base" [ref=e15]
+      - text: Sin imagen base
+    - generic [ref=e16]:
+      - generic [ref=e17]:
+        - text: "Opacidad terreno:"
+        - strong [ref=e18]: 100%
+      - 'slider "Opacidad terreno: 100%" [ref=e19]': "100"
+    - generic [ref=e20]: Presets
+    - generic [ref=e21]:
+      - button "Simple" [ref=e22] [cursor=pointer]
+      - button "Solo calles" [ref=e23] [cursor=pointer]
+      - button "Todo" [ref=e24] [cursor=pointer]
+      - button "Quitar todo" [ref=e25] [cursor=pointer]
+    - generic [ref=e26]: Contenido
+    - generic [ref=e27] [cursor=pointer]:
+      - checkbox "Calles" [checked] [ref=e28]
+      - text: Calles
+    - generic [ref=e29] [cursor=pointer]:
+      - checkbox "Edificios 3D" [checked] [ref=e30]
+      - text: Edificios 3D
+    - generic [ref=e31]:
+      - text: Paleta muros
+      - combobox [ref=e32]:
+        - option "Tierra" [selected]
+        - option "Costera"
+        - option "Bosque"
+        - option "Neutra"
+        - option "Color base"
+      - textbox [ref=e33] [cursor=pointer]: "#d6c39a"
+    - generic [ref=e34]:
+      - text: Paleta techos
+      - combobox [ref=e35]:
+        - option "Terracota" [selected]
+        - option "Mixta"
+        - option "Pizarra"
+        - option "Tropical"
+        - option "Arena"
+        - option "Color base"
+      - textbox [ref=e36] [cursor=pointer]: "#9b6b43"
+    - generic [ref=e37] [cursor=pointer]:
+      - checkbox "Nodos hidráulicos" [checked] [ref=e38]
+      - text: Nodos hidráulicos
+    - generic [ref=e39] [cursor=pointer]:
+      - checkbox "Red combinada" [checked] [ref=e40]
+      - text: Red combinada
+    - generic [ref=e41]:
+      - text: Color red combinada
+      - textbox [ref=e42] [cursor=pointer]: "#36e2b6"
+    - generic [ref=e43]:
+      - generic [ref=e44]:
+        - text: "Grosor red:"
+        - strong [ref=e45]: 2.5 m
+      - 'slider "Grosor red: 2.5 m" [ref=e46]': "2.5"
+    - generic [ref=e47]:
+      - generic [ref=e48]:
+        - text: "Enterrar red:"
+        - strong [ref=e49]: 0%
+      - 'slider "Enterrar red: 0%" [ref=e50]': "0"
+    - generic [ref=e51] [cursor=pointer]:
+      - checkbox "Ríos" [ref=e52]
+      - text: Ríos
+    - generic [ref=e53] [cursor=pointer]:
+      - checkbox "Curvas" [ref=e54]
+      - text: Curvas
+    - generic [ref=e55] [cursor=pointer]:
+      - checkbox "Catastro" [ref=e56]
+      - text: Catastro
+    - generic [ref=e57] [cursor=pointer]:
+      - checkbox "Acumulación" [ref=e58]
+      - text: Acumulación
+    - generic [ref=e59]:
+      - text: Color de acumulación
+      - textbox [ref=e60] [cursor=pointer]: "#ffe080"
+      - text: Debajo del inicio la capa queda transparente
+    - generic [ref=e61]:
+      - generic [ref=e62]:
+        - text: Inicio
+        - slider "Inicio" [ref=e63]: "18"
+      - generic [ref=e64]:
+        - text: Fin
+        - slider "Fin" [ref=e65]: "82"
+    - generic [ref=e66]: Visible entre 18% y 82%
+    - generic [ref=e67] [cursor=pointer]:
+      - checkbox "Flechas" [ref=e68]
+      - text: Flechas
+    - generic [ref=e69]:
+      - generic [ref=e70]:
+        - text: "Densidad de flechas:"
+        - strong [ref=e71]: Media
+      - 'slider "Densidad de flechas: Media Baja a alta densidad" [ref=e72]': "3"
+      - text: Baja a alta densidad
+    - generic [ref=e73] [cursor=pointer]:
+      - checkbox "Zonas verdes" [ref=e74]
+      - text: Zonas verdes
+    - generic [ref=e75] [cursor=pointer]:
+      - checkbox "Desfogues" [ref=e76]
+      - text: Desfogues
+    - generic [ref=e77] [cursor=pointer]:
+      - checkbox "Área de estudio" [ref=e78]
+      - text: Área de estudio
+    - generic [ref=e79] [cursor=pointer]:
+      - checkbox "Retícula" [ref=e80]
+      - text: Retícula
+  - generic [ref=e81]: "🖱 Arrastrar: Orbitar | Scroll: Zoom | Clic derecho: Desplazar"

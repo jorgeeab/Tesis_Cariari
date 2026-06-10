@@ -62,6 +62,12 @@ STRUCTURE_SURFACE_TOL = 4.0     # diferencia maxima admisible contra el DEM prel
 STRUCTURE_MIN_ELEV  = 900.0
 STRUCTURE_MAX_ELEV  = 1100.0
 STRUCTURE_MAX_DEPTH = 12.0
+DEFAULT_STRUCTURE_DEPTH_M = {
+    "tragante": 0.80,
+    "crp": 1.60,
+    "crn": 1.40,
+    "desfogue": 0.60,
+}
 NETWORK_MAX_LINK_M  = 260.0
 NETWORK_MIN_DROP_M  = 0.10
 STREET_SNAP_MAX_M   = 24.0
@@ -116,6 +122,7 @@ CACHE_CLP = OUT_DIR / "_cache_curvas_clipped"
 CACHE_OSM = OUT_DIR / "_cache_osm"
 CACHE_CAT = OUT_DIR / "_cache_catastro"
 CACHE_OVERTURE = OUT_DIR / "_cache_overture"
+CACHE_TEX = OUT_DIR / "_cache_texturas"
 
 # Archivos de datos adicionales (ríos y puntos de desfogue)
 CAUCE_SHP        = Path("Arcgis shapes y curvas/Cauce.shp")
@@ -590,7 +597,8 @@ def download_tile(x, y, z, session, idx=0):
 def build_satellite_texture(lon_min, lat_min, lon_max, lat_max):
     """
     Extrae la textura del área de estudio recortando la imagen satelital local de alta resolución.
-    Usamos rasterio para leer sólo la ventana necesaria del JPG masivo (EPSG:3395).
+    Lee directamente la ventana remuestreada del raster para evitar cargar en memoria
+    recortes gigantes del JPG original.
     """
     img_path = Path("Arcgis shapes y curvas/Imagen Satelital_TESIS.jpg")
     if not img_path.exists():
@@ -599,52 +607,81 @@ def build_satellite_texture(lon_min, lat_min, lon_max, lat_max):
 
     try:
         import rasterio
-        from rasterio.windows import from_bounds
+        from rasterio.enums import Resampling
+        from rasterio.windows import Window, from_bounds
         from pyproj import Transformer
         import numpy as np
     except ImportError:
         print("  Falta rasterio o pyproj. Ejecuta: pip install rasterio pyproj")
         return None
 
-    print(f"  Transformando BBox a CRS de la imagen...")
-    t = Transformer.from_crs(4326, 3395, always_xy=True)
-    x_min, y_min = t.transform(lon_min, lat_min)
-    x_max, y_max = t.transform(lon_max, lat_max)
+    CACHE_TEX.mkdir(parents=True, exist_ok=True)
+    cache_key = f"{lon_min:.6f},{lat_min:.6f},{lon_max:.6f},{lat_max:.6f}|{TEXTURE_LONG_SIDE}"
+    cache_hash = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:12]
+    cache_file = CACHE_TEX / f"sat_{cache_hash}.png"
+    if cache_file.exists():
+        print(f"  Usando caché textura: {cache_file.name}")
+        return cache_file.read_bytes()
 
-    print(f"  Extrayendo textura de la imagen local (~400MB) ...")
+    print(f"  Transformando BBox a CRS de la imagen...")
     with rasterio.open(img_path) as src:
-        # Calcular ventana que corresponde a nuestro BBox
-        window = from_bounds(x_min, y_min, x_max, y_max, transform=src.transform)
-        # Leer solo esa ventana
-        data = src.read(window=window)
-        if data.size == 0:
+        if src.crs is None:
+            print("  La imagen satelital no tiene CRS legible.")
+            return None
+
+        transformer = Transformer.from_crs(4326, src.crs, always_xy=True)
+        x0, y0 = transformer.transform(lon_min, lat_min)
+        x1, y1 = transformer.transform(lon_max, lat_max)
+        left, right = sorted((x0, x1))
+        bottom, top = sorted((y0, y1))
+        if right <= src.bounds.left or left >= src.bounds.right or top <= src.bounds.bottom or bottom >= src.bounds.top:
             print("  El área de estudio está fuera de los límites de la imagen satelital.")
             return None
 
-    # rasterio lee (bandas, alto, ancho), PIL necesita (alto, ancho, bandas)
-    if data.shape[0] >= 3:
-        data = data[:3, :, :] # RGB solamente si tiene canal alpha
+        print(f"  Extrayendo textura de la imagen local (~400MB) ...")
+        window = from_bounds(left, bottom, right, top, transform=src.transform)
+        window = window.intersection(Window(0, 0, src.width, src.height))
+        window = window.round_offsets().round_lengths()
+        if window.width <= 1 or window.height <= 1:
+            print("  El área de estudio está fuera de los límites de la imagen satelital.")
+            return None
 
-    img_arr = np.transpose(data, (1, 2, 0))
-    img = Image.fromarray(img_arr)
-    
-    # Escalar al tamaño máximo para no sobrecargar el navegador
-    cw, ch = img.size
-    print(f"  Textura original extraída: {cw}×{ch} px")
-    if cw >= ch:
-        new_w = TEXTURE_LONG_SIDE
-        new_h = int(ch * TEXTURE_LONG_SIDE / cw)
-    else:
-        new_h = TEXTURE_LONG_SIDE
-        new_w = int(cw * TEXTURE_LONG_SIDE / ch)
-    new_w = max(new_w, 1); new_h = max(new_h, 1)
+        if window.width >= window.height:
+            new_w = TEXTURE_LONG_SIDE
+            new_h = int(round(window.height * TEXTURE_LONG_SIDE / max(window.width, 1)))
+        else:
+            new_h = TEXTURE_LONG_SIDE
+            new_w = int(round(window.width * TEXTURE_LONG_SIDE / max(window.height, 1)))
+        new_w = max(1, new_w)
+        new_h = max(1, new_h)
 
-    resized = img.resize((new_w, new_h), Image.LANCZOS)
-    print(f"  Textura escalada final: {new_w}×{new_h} px")
+        band_count = min(3, src.count)
+        data = src.read(
+            indexes=list(range(1, band_count + 1)),
+            window=window,
+            out_shape=(band_count, new_h, new_w),
+            resampling=Resampling.bilinear,
+        )
+
+    if data.size == 0:
+        print("  No se pudo leer la textura en la ventana solicitada.")
+        return None
+
+    if data.shape[0] == 1:
+        data = np.repeat(data, 3, axis=0)
+
+    if data.dtype != np.uint8:
+        data = np.clip(data, 0, 255).astype(np.uint8)
+
+    img_arr = np.transpose(data[:3, :, :], (1, 2, 0))
+    img = Image.fromarray(img_arr, mode="RGB")
+    print(f"  Textura final remuestreada: {new_w}×{new_h} px")
 
     buf = io.BytesIO()
-    resized.save(buf, format="PNG", optimize=False)
-    return buf.getvalue()
+    img.save(buf, format="PNG", optimize=False)
+    png_bytes = buf.getvalue()
+    cache_file.write_bytes(png_bytes)
+    return png_bytes
 
 
 # ─────────────────────────────────────────────────────────────
@@ -826,6 +863,9 @@ def classify_hydraulic_structures(structures, dem, lons, lats):
         raw_s = row.get("surface_raw")
         raw_f = row.get("depth_raw")
         depth_ok = raw_f is not None and 0.0 <= raw_f <= STRUCTURE_MAX_DEPTH
+        default_depth = DEFAULT_STRUCTURE_DEPTH_M.get(row["kind"], 1.20)
+        depth_used = raw_f if depth_ok else default_depth
+        depth_source = "campo" if depth_ok else "estimado"
 
         qa_flags = []
         if raw_s is not None and not (STRUCTURE_MIN_ELEV <= raw_s <= STRUCTURE_MAX_ELEV):
@@ -863,7 +903,15 @@ def classify_hydraulic_structures(structures, dem, lons, lats):
             bottom_elev = surface_elev - raw_f
         elif raw_s is not None and depth_ok and terrain is not None and raw_s < terrain - STRUCTURE_SURFACE_TOL:
             bottom_elev = raw_s
+            depth_used = max(0.10, (surface_elev if surface_elev is not None else terrain) - raw_s)
+            depth_source = "s_parece_fondo"
             qa_flags.append("s_parece_fondo")
+        else:
+            ref_surface = surface_elev if surface_elev is not None else terrain
+            if ref_surface is not None:
+                bottom_elev = ref_surface - depth_used
+                if not depth_ok:
+                    qa_flags.append("f_estimado")
 
         if qa_flags:
             flagged += 1
@@ -877,6 +925,8 @@ def classify_hydraulic_structures(structures, dem, lons, lats):
             "surface_mode": surface_mode,
             "bottom_elev": bottom_elev,
             "depth_valid": depth_ok,
+            "depth_used": depth_used,
+            "depth_source": depth_source,
             "use_for_dem": surface_elev is not None,
             "qa_flags": qa_flags,
             "role": "inlet" if row["kind"] == "tragante" else "node",
@@ -1050,10 +1100,19 @@ def build_hydraulic_network(structures, outlets, streets):
 
     usable_outlets = []
     for outlet in outlets:
-        out_elev = outlet.get("surface_raw")
-        if out_elev is None:
-            out_elev = outlet.get("terrain_elev")
-        usable_outlets.append({**outlet, "hydraulic_elev": out_elev})
+        outlet_surface = outlet.get("surface_raw")
+        if outlet_surface is None:
+            outlet_surface = outlet.get("terrain_elev")
+        depth_used = DEFAULT_STRUCTURE_DEPTH_M.get("desfogue", 0.60)
+        out_elev = outlet_surface - depth_used if outlet_surface is not None else None
+        usable_outlets.append({
+            **outlet,
+            "surface_elev": outlet_surface,
+            "bottom_elev": out_elev,
+            "depth_used": depth_used,
+            "depth_source": "estimado",
+            "hydraulic_elev": out_elev,
+        })
 
     if not usable_nodes:
         return []
@@ -1139,6 +1198,12 @@ def build_hydraulic_network(structures, outlets, streets):
             "target_kind": dst.get("kind", "desfogue"),
             "drop_m": round(src["hydraulic_elev"] - dst["hydraulic_elev"], 2),
             "distance_m": round(best["path_len"], 1),
+            "source_elev": src.get("hydraulic_elev"),
+            "target_elev": dst.get("hydraulic_elev"),
+            "source_depth_m": src.get("depth_used", DEFAULT_STRUCTURE_DEPTH_M.get(src["kind"], 1.20)),
+            "target_depth_m": dst.get("depth_used", DEFAULT_STRUCTURE_DEPTH_M.get(dst.get("kind", "desfogue"), 1.20)),
+            "source_depth_source": src.get("depth_source", ""),
+            "target_depth_source": dst.get("depth_source", ""),
             "points": best["path"],
         })
 
@@ -1568,6 +1633,8 @@ def hydraulic_nodes_to_threejs(structures, lon_center, lat_center, dem, lons, la
             "z": round(-y_m, 2),
             "surface": round(row["surface_elev"], 2) if row.get("surface_elev") is not None else None,
             "bottom": round(row["bottom_elev"], 2) if row.get("bottom_elev") is not None else None,
+            "depth": round(row["depth_used"], 2) if row.get("depth_used") is not None else None,
+            "depth_source": row.get("depth_source", ""),
             "terrain": round(terrain, 2),
             "qa": row.get("qa_flags", []),
             "capture": sink_loads.get(row["id"], 0.0),
@@ -1576,19 +1643,42 @@ def hydraulic_nodes_to_threejs(structures, lon_center, lat_center, dem, lons, la
 
 
 def hydraulic_links_to_threejs(links, lon_center, lat_center, dem, lons, lats):
-    """Convierte la red preliminar a lineas 3D visibles justo sobre la superficie."""
+    """Convierte la red preliminar a lineas 3D, con posicion superficial y enterrada."""
     mpd_lon = 111320.0 * math.cos(math.radians(lat_center))
     mpd_lat = 110540.0
     out = []
     for link in links:
         pts = []
+        buried_pts = []
+        raw_path = link.get("points", [])
+        cumulative = [0.0]
+        for idx in range(1, len(raw_path)):
+            prev = raw_path[idx - 1]
+            curr = raw_path[idx]
+            cumulative.append(cumulative[-1] + lonlat_distance_m(prev[0], prev[1], curr[0], curr[1], lat_ref=lat_center))
+        total_len = cumulative[-1] if cumulative else 0.0
+        src_depth = float(link.get("source_depth_m") or DEFAULT_STRUCTURE_DEPTH_M.get(link.get("source_kind", ""), 1.20))
+        dst_depth = float(link.get("target_depth_m") or DEFAULT_STRUCTURE_DEPTH_M.get(link.get("target_kind", ""), 1.20))
+        src_elev = link.get("source_elev")
+        dst_elev = link.get("target_elev")
+
         for lon, lat in link.get("points", []):
             terrain = sample_dem_value(dem, lons, lats, lon, lat)
             if terrain is None:
                 continue
+            idx = len(pts)
+            t = cumulative[idx] / total_len if total_len > 0 and idx < len(cumulative) else 0.0
             x_m = (lon - lon_center) * mpd_lon
             y_m = (lat - lat_center) * mpd_lat
-            pts.append([round(x_m, 2), round(terrain * Z_EXAG + 0.55, 2), round(-y_m, 2)])
+            surface_y = terrain * Z_EXAG + 0.55
+            if src_elev is not None and dst_elev is not None:
+                hydraulic_elev = float(src_elev) + (float(dst_elev) - float(src_elev)) * t
+            else:
+                depth_here = src_depth + (dst_depth - src_depth) * t
+                hydraulic_elev = terrain - depth_here
+            buried_y = min(surface_y - 0.25, hydraulic_elev * Z_EXAG + 0.10)
+            pts.append([round(x_m, 2), round(surface_y, 2), round(-y_m, 2)])
+            buried_pts.append([round(x_m, 2), round(buried_y, 2), round(-y_m, 2)])
         if len(pts) >= 2:
             out.append({
                 "id": link["id"],
@@ -1596,7 +1686,11 @@ def hydraulic_links_to_threejs(links, lon_center, lat_center, dem, lons, lats):
                 "target_kind": link.get("target_kind", ""),
                 "drop_m": link.get("drop_m"),
                 "distance_m": link.get("distance_m"),
+                "depth_m": round((src_depth + dst_depth) / 2.0, 2),
+                "source_depth_source": link.get("source_depth_source", ""),
+                "target_depth_source": link.get("target_depth_source", ""),
                 "points": pts,
+                "buried_points": buried_pts,
             })
     return out
 
@@ -2242,7 +2336,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   #info h2 {{ font-size:15px; color:#7ecfff; margin-bottom:6px; }}
   #info .stat {{ color:#aed6f1; }}
   #legend {{
-    position:absolute; bottom:14px; right:14px;
+    position:absolute; top:56px; right:252px;
     background:rgba(10,10,24,0.82);
     color:#e8f4ff;
     padding:10px 14px;
@@ -2251,9 +2345,11 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     font-size:12px;
     line-height:1.8;
     backdrop-filter:blur(6px);
-    max-width:260px;
-    max-height:46vh;
+    width:min(300px, calc(100vw - 304px));
+    max-width:300px;
+    max-height:calc(100vh - 72px);
     overflow:auto;
+    z-index:4;
   }}
   .leg-item {{ display:flex; align-items:center; gap:8px; }}
   .leg-swatch {{ width:24px; height:4px; border-radius:2px; }}
@@ -2384,6 +2480,13 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     #layer-panel {{
       width:min(224px, calc(100vw - 28px));
     }}
+    #legend {{
+      top:14px;
+      right:14px;
+      width:min(280px, calc(100vw - 28px));
+      max-width:none;
+      max-height:42vh;
+    }}
   }}
 </style>
 </head>
@@ -2413,8 +2516,12 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <h3>Capas</h3>
   <div class="layer-subtitle">Base</div>
   <label class="layer-row"><input type="radio" name="base-mode" value="simple" checked>Terreno simple</label>
-  <label class="layer-row"><input type="radio" name="base-mode" value="satellite">Imagen satelital</label>
+  <label class="layer-row"><input type="radio" name="base-mode" value="satellite" {'disabled' if not has_texture else ''}>Imagen satelital{' (no disponible)' if not has_texture else ''}</label>
   <label class="layer-row"><input type="radio" name="base-mode" value="none">Sin imagen base</label>
+  <label class="layer-row layer-row--stack">
+    <span>Opacidad terreno: <strong id="terrain-opacity-label">100%</strong></span>
+    <input id="terrain-opacity" class="layer-range" type="range" min="0" max="100" step="5" value="100">
+  </label>
 
   <div class="layer-subtitle">Presets</div>
   <div class="preset-row">
@@ -2457,8 +2564,12 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     <input id="hydraulic-link-color" class="layer-color" type="color" value="#36e2b6">
   </div>
   <label class="layer-row layer-row--stack">
-    <span>Grosor red: <strong id="hydraulic-link-width-label">5.0 m</strong></span>
-    <input id="hydraulic-link-width" class="layer-range" type="range" min="2" max="10" step="0.5" value="5">
+    <span>Grosor red: <strong id="hydraulic-link-width-label">2.5 m</strong></span>
+    <input id="hydraulic-link-width" class="layer-range" type="range" min="1" max="5" step="0.25" value="2.5">
+  </label>
+  <label class="layer-row layer-row--stack">
+    <span>Enterrar red: <strong id="hydraulic-link-burial-label">0%</strong></span>
+    <input id="hydraulic-link-burial" class="layer-range" type="range" min="0" max="100" step="5" value="0">
   </label>
   <label class="layer-row"><input id="toggle-rivers" type="checkbox">Ríos</label>
   <label class="layer-row"><input id="toggle-contours" type="checkbox">Curvas</label>
@@ -2634,8 +2745,10 @@ const viewerState = {{
   flowColor: '#ffe080',
   flowRangeMin: 0.18,
   flowRangeMax: 0.82,
+  terrainOpacity: 1.0,
   hydraulicLinkColor: '#36e2b6',
-  hydraulicLinkWidth: 5.0,
+  hydraulicLinkWidth: 2.5,
+  hydraulicLinkBurial: 0.0,
   buildingWallPalette: 'earth',
   buildingWallColor: '#d6c39a',
   buildingRoofPalette: 'terracotta',
@@ -2728,9 +2841,13 @@ const uiArrowDensityLabel = document.getElementById('arrow-density-label');
 const uiFlowColor = document.getElementById('flow-color');
 const uiFlowRangeMin = document.getElementById('flow-range-min');
 const uiFlowRangeMax = document.getElementById('flow-range-max');
+const uiTerrainOpacity = document.getElementById('terrain-opacity');
+const uiTerrainOpacityLabel = document.getElementById('terrain-opacity-label');
 const uiHydraulicLinkColor = document.getElementById('hydraulic-link-color');
 const uiHydraulicLinkWidth = document.getElementById('hydraulic-link-width');
 const uiHydraulicLinkWidthLabel = document.getElementById('hydraulic-link-width-label');
+const uiHydraulicLinkBurial = document.getElementById('hydraulic-link-burial');
+const uiHydraulicLinkBurialLabel = document.getElementById('hydraulic-link-burial-label');
 const uiBuildingWallPalette = document.getElementById('building-wall-palette');
 const uiBuildingWallColor = document.getElementById('building-wall-color');
 const uiBuildingRoofPalette = document.getElementById('building-roof-palette');
@@ -2779,6 +2896,15 @@ scene.add(new THREE.AmbientLight(0xffffff, 0.92));
 const dirLight = new THREE.DirectionalLight(0xfff5e0, 0.35);
 dirLight.position.set(DEM.widthM * 0.6, DEM.zMax * 1.5, DEM.heightM * 0.4);
 dirLight.castShadow = true;
+dirLight.shadow.mapSize.width = 2048;
+dirLight.shadow.mapSize.height = 2048;
+dirLight.shadow.camera.left = -DEM.widthM * 0.8;
+dirLight.shadow.camera.right = DEM.widthM * 0.8;
+dirLight.shadow.camera.top = DEM.heightM * 0.8;
+dirLight.shadow.camera.bottom = -DEM.heightM * 0.8;
+dirLight.shadow.camera.near = 1;
+dirLight.shadow.camera.far = 5000;
+dirLight.shadow.bias = -0.00025;
 scene.add(dirLight);
 
 scene.add(new THREE.HemisphereLight(0x87ceeb, 0x3a3a2a, 0.20));
@@ -2961,9 +3087,26 @@ function updateFlowLegendSwatch() {{
   flowLegendSwatch.style.background = `linear-gradient(90deg, rgba(${{color.r}}, ${{color.g}}, ${{color.b}}, 0), rgba(${{color.r}}, ${{color.g}}, ${{color.b}}, 1))`;
 }}
 
+function applyTerrainOpacity() {{
+  const opacity = clamp(viewerState.terrainOpacity, 0, 1);
+  if (uiTerrainOpacityLabel) {{
+    uiTerrainOpacityLabel.textContent = `${{Math.round(opacity * 100)}}%`;
+  }}
+  for (const mesh of [terrainSimpleMesh, terrainSatelliteMesh]) {{
+    if (!mesh || !mesh.material) continue;
+    mesh.material.transparent = opacity < 0.995;
+    mesh.material.opacity = opacity;
+    mesh.material.depthWrite = opacity >= 0.95;
+    mesh.material.needsUpdate = true;
+  }}
+}}
+
 function updateHydraulicLinkLegend() {{
   if (uiHydraulicLinkWidthLabel) {{
     uiHydraulicLinkWidthLabel.textContent = `${{viewerState.hydraulicLinkWidth.toFixed(1)}} m`;
+  }}
+  if (uiHydraulicLinkBurialLabel) {{
+    uiHydraulicLinkBurialLabel.textContent = `${{Math.round(viewerState.hydraulicLinkBurial * 100)}}%`;
   }}
   if (hydraulicLinkLegendSwatch) {{
     hydraulicLinkLegendSwatch.style.background = viewerState.hydraulicLinkColor;
@@ -2990,9 +3133,14 @@ function rebuildHydraulicLinks() {{
   clearGroup(hydraulicLinkLayer);
   if (!HYDRAULIC_LINKS || !HYDRAULIC_LINKS.length) return;
 
-  const radius = Math.max(1.1, viewerState.hydraulicLinkWidth * 0.42);
+  const radius = Math.max(0.55, viewerState.hydraulicLinkWidth * 0.42);
+  const burial = clamp(viewerState.hydraulicLinkBurial, 0, 1);
   for (const link of HYDRAULIC_LINKS) {{
-    const pts = link.points.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+    const buried = link.buried_points || link.points;
+    const pts = link.points.map((p, idx) => {{
+      const b = buried[idx] || p;
+      return new THREE.Vector3(p[0], lerp(p[1], b[1], burial), p[2]);
+    }});
     if (pts.length < 2) continue;
     const curvePath = new THREE.CurvePath();
     for (let i = 1; i < pts.length; i++) {{
@@ -3129,6 +3277,7 @@ function setBaseMode(mode) {{
 
 function applyViewerState() {{
   setBaseMode(viewerState.baseMode);
+  applyTerrainOpacity();
   for (const [key, group] of Object.entries(layerGroups)) {{
     group.visible = !!viewerState[key];
   }}
@@ -3153,11 +3302,17 @@ function syncLayerPanel() {{
   if (uiFlowRangeMax) {{
     uiFlowRangeMax.value = String(Math.round(viewerState.flowRangeMax * 100));
   }}
+  if (uiTerrainOpacity) {{
+    uiTerrainOpacity.value = String(Math.round(viewerState.terrainOpacity * 100));
+  }}
   if (uiHydraulicLinkColor) {{
     uiHydraulicLinkColor.value = viewerState.hydraulicLinkColor;
   }}
   if (uiHydraulicLinkWidth) {{
     uiHydraulicLinkWidth.value = String(viewerState.hydraulicLinkWidth);
+  }}
+  if (uiHydraulicLinkBurial) {{
+    uiHydraulicLinkBurial.value = String(Math.round(viewerState.hydraulicLinkBurial * 100));
   }}
   if (uiBuildingWallPalette) {{
     uiBuildingWallPalette.value = viewerState.buildingWallPalette;
@@ -3174,6 +3329,7 @@ function syncLayerPanel() {{
   updateArrowDensityLabel();
   updateFlowRangeLabel();
   updateFlowLegendSwatch();
+  applyTerrainOpacity();
   updateHydraulicLinkLegend();
   for (const [key, input] of Object.entries(uiToggles)) {{
     if (input) input.checked = !!viewerState[key];
@@ -3226,6 +3382,13 @@ if (uiFlowRangeMax) {{
   }});
 }}
 
+if (uiTerrainOpacity) {{
+  uiTerrainOpacity.addEventListener('input', () => {{
+    viewerState.terrainOpacity = clamp((Number(uiTerrainOpacity.value) || 0) / 100, 0, 1);
+    applyTerrainOpacity();
+  }});
+}}
+
 if (uiHydraulicLinkColor) {{
   uiHydraulicLinkColor.addEventListener('input', () => {{
     viewerState.hydraulicLinkColor = uiHydraulicLinkColor.value || '#36e2b6';
@@ -3236,7 +3399,15 @@ if (uiHydraulicLinkColor) {{
 
 if (uiHydraulicLinkWidth) {{
   uiHydraulicLinkWidth.addEventListener('input', () => {{
-    viewerState.hydraulicLinkWidth = Number(uiHydraulicLinkWidth.value) || 5.0;
+    viewerState.hydraulicLinkWidth = Number(uiHydraulicLinkWidth.value) || 2.5;
+    updateHydraulicLinkLegend();
+    rebuildHydraulicLinks();
+  }});
+}}
+
+if (uiHydraulicLinkBurial) {{
+  uiHydraulicLinkBurial.addEventListener('input', () => {{
+    viewerState.hydraulicLinkBurial = clamp((Number(uiHydraulicLinkBurial.value) || 0) / 100, 0, 1);
     updateHydraulicLinkLegend();
     rebuildHydraulicLinks();
   }});
@@ -3579,6 +3750,8 @@ if (BUILDINGS.length) {{
     }});
     const mesh = new THREE.Mesh(geo, wallMat);
     mesh.renderOrder = 3;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     mesh.userData.surfaceType = 'wall';
     mesh.userData.paletteSeed = buildingIndex + hashString(building.source_class || building.source || 'other');
     buildingLayer.add(mesh);
@@ -3605,6 +3778,8 @@ if (BUILDINGS.length) {{
     }});
     const roofMesh = new THREE.Mesh(roofGeo, roofMat);
     roofMesh.renderOrder = 4;
+    roofMesh.castShadow = true;
+    roofMesh.receiveShadow = true;
     roofMesh.userData.surfaceType = 'roof';
     roofMesh.userData.paletteSeed = buildingIndex + 11 + hashString(building.source_class || building.source || 'other');
     buildingLayer.add(roofMesh);
@@ -3783,11 +3958,11 @@ def main():
     # ── 5. Textura satelital ────────────────────────────────
     print("\n[5] Descargando textura satelital ...")
     tex_bytes = None
-    if HAS_PIL and HAS_REQUESTS:
+    if HAS_PIL:
         try:
             tex_bytes = build_satellite_texture(lon_min, lat_min, lon_max, lat_max)
         except Exception as e:
-            print(f"  Error textura: {e}")
+            print(f"  Error textura: {e!r}")
     tex_b64 = base64.b64encode(tex_bytes).decode() if tex_bytes else ""
 
     print("\n[5b] Descargando overlay catastral ...")
