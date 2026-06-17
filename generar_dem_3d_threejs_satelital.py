@@ -794,9 +794,14 @@ def apply_street_profile_dem(dem, lons, lats, streets,
 
     n_cut = int((offset > 0.01).sum())
     dem = dem - offset
+
+    # Máscara normalizada 0-1 en orden Three.js (flipud: fila 0 = lat_max)
+    # Se usa para el overlay de color de calle en el viewer
+    street_mask = _np.flipud(offset / depth_m).flatten().tolist()
+
     print(f"  Perfil calle en DEM: {n_cut} celdas modificadas "
           f"(prof. {depth_m} m, core ±{core_half_m} m, rampa ±{ramp_half_m} m)")
-    return dem
+    return dem, street_mask
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2638,7 +2643,8 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
 
     # Serializar datos para JS
     # Curvas de nivel: se muestran en 3D | Rutas GPS: solo para DEM, no se muestran
-    heights_json   = json.dumps(dem_data["heights"])
+    heights_json     = json.dumps(dem_data["heights"])
+    street_mask_json = json.dumps(dem_data.get("streetMask", []))
     contours_json  = json.dumps(contours_3d)
     rivers_json    = json.dumps(rivers_3d)
     drainage_json  = json.dumps(drainage_pts_3d)
@@ -2873,6 +2879,15 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
 
   <div class="layer-subtitle">Contenido</div>
   <label class="layer-row"><input id="toggle-streets" type="checkbox" checked>Calles (líneas)</label>
+  <label class="layer-row"><input id="toggle-street-overlay" type="checkbox" checked>Color de calles</label>
+  <div class="layer-row layer-row--stack">
+    <span>Color calles</span>
+    <input id="street-overlay-color" class="layer-color" type="color" value="#3a3530">
+  </div>
+  <label class="layer-row layer-row--stack">
+    <span>Opacidad calles: <strong id="street-overlay-opacity-label">90%</strong></span>
+    <input id="street-overlay-opacity" class="layer-range" type="range" min="0" max="100" step="5" value="90">
+  </label>
 
   <label class="layer-row"><input id="toggle-buildings" type="checkbox" checked>Edificios 3D</label>
   <div class="layer-row layer-row--stack">
@@ -2973,7 +2988,8 @@ const DEM = {{
   ny:      {dem_data['ny']},
   zMin:    {dem_data['z_min']},
   zMax:    {dem_data['z_max']},
-  heights: {heights_json}
+  heights:    {heights_json},
+  streetMask: {street_mask_json}
 }};
 
 const CONTOURS       = {contours_json};
@@ -3036,6 +3052,7 @@ const curtainLayer = new THREE.Group();
 const contourLayer = new THREE.Group();
 const riverLayer = new THREE.Group();
 const streetLayer = new THREE.Group();
+const streetOverlayLayer = new THREE.Group();
 const buildingLayer = new THREE.Group();
 const hydraulicNodeLayer = new THREE.Group();
 const hydraulicLinkLayer = new THREE.Group();
@@ -3046,7 +3063,7 @@ const flowArrowLayer = new THREE.Group();
 
 for (const layer of [
   baseTerrainLayer, catastroLayer, gridLayer, curtainLayer, contourLayer,
-  riverLayer, streetLayer, buildingLayer, hydraulicNodeLayer, hydraulicLinkLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
+  riverLayer, streetLayer, streetOverlayLayer, buildingLayer, hydraulicNodeLayer, hydraulicLinkLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
 ]) {{
   scene.add(layer);
 }}
@@ -3055,6 +3072,7 @@ const layerGroups = {{
   contours: contourLayer,
   rivers: riverLayer,
   streets: streetLayer,
+  streetOverlay: streetOverlayLayer,
   buildings: buildingLayer,
   hydraulicNodes: hydraulicNodeLayer,
   hydraulicLinks: hydraulicLinkLayer,
@@ -3081,9 +3099,12 @@ const viewerState = {{
   buildingWallColor: '#d6c39a',
   buildingRoofPalette: 'terracotta',
   buildingRoofColor: '#9b6b43',
+  streetOverlayColor: '#3a3530',
+  streetOverlayOpacity: 0.90,
   contours: false,
   rivers: false,
   streets: false,
+  streetOverlay: true,
   buildings: true,
   hydraulicNodes: true,
   hydraulicLinks: true,
@@ -3190,6 +3211,7 @@ const hydraulicLinkLegendSwatch = document.getElementById('hydraulic-link-legend
 const arrowCountStat = document.getElementById('arrow-count-stat');
 const uiToggles = {{
   streets: document.getElementById('toggle-streets'),
+  streetOverlay: document.getElementById('toggle-street-overlay'),
   buildings: document.getElementById('toggle-buildings'),
   hydraulicNodes: document.getElementById('toggle-hydraulic-nodes'),
   rivers: document.getElementById('toggle-rivers'),
@@ -4367,14 +4389,15 @@ def main():
 
     # Perfil trapezoidal de calles directo sobre el DEM (antes de preparar la malla)
     print("\n[6g3] Aplicando perfil trapezoidal de calles al DEM ...")
-    dem = apply_street_profile_dem(dem, lons, lats, raw_streets,
-                                   depth_m=1.5, core_half_m=3.5, ramp_half_m=10.0)
+    dem, street_mask = apply_street_profile_dem(dem, lons, lats, raw_streets,
+                                                depth_m=1.5, core_half_m=3.5, ramp_half_m=10.0)
     print(f"  DEM visual final: zMin={dem.min():.1f}m  zMax={dem.max():.1f}m")
 
     # Preparar malla 3D desde DEM modificado (ríos + edificios + calles)
     print("\n[6g4] Preparando malla 3D ...")
     streets_3d  = streets_to_threejs(raw_streets, lon_center, lat_center, dem, lons, lats)
     dem_data    = prepare_dem_for_threejs(dem, lons, lats, lon_center, lat_center)
+    dem_data["streetMask"] = street_mask   # overlay de color de calle en JS
     contours_3d = contours_to_threejs(contours_dict, lon_center, lat_center, dem, lons, lats)
     rivers_3d   = rivers_to_threejs(raw_rivers, lon_center, lat_center, dem, lons, lats)
 
