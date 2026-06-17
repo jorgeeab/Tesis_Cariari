@@ -850,6 +850,63 @@ def build_street_polygons(streets, lat_center):
     return merged
 
 
+def street_segments_to_threejs(raw_streets, lon_center, lat_center):
+    """
+    Crea un quad rectangular por cada segmento de calle OSM.
+    Evita triangulación de MultiPolygon complejo — cada quad = 4 vértices, 2 triángulos.
+    Retorna lista de quads: [[[x0,z0],[x1,z1],[x2,z2],[x3,z3]], ...]
+    """
+    lat_mid = lat_center
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_mid))
+    mpd_lat = 110540.0
+
+    HALF_WIDTH_M = {
+        "motorway": 7.0, "trunk": 6.0, "primary": 5.5,
+        "secondary": 4.5, "tertiary": 4.0,
+        "residential": 3.5, "living_street": 3.0,
+        "service": 2.5, "unclassified": 3.5,
+        "footway": 1.5, "path": 1.2, "cycleway": 1.5, "steps": 1.0,
+    }
+    DEFAULT_HW = 3.5
+
+    result = []
+    for street in raw_streets:
+        coords = street.get("coords", [])
+        if len(coords) < 2:
+            continue
+        hw = street.get("highway", "residential")
+        half_w_m = HALF_WIDTH_M.get(hw, DEFAULT_HW)
+
+        for k in range(len(coords) - 1):
+            lon_a, lat_a = coords[k]
+            lon_b, lat_b = coords[k + 1]
+
+            xa = (lon_a - lon_center) * mpd_lon
+            za = -(lat_a - lat_center) * mpd_lat
+            xb = (lon_b - lon_center) * mpd_lon
+            zb = -(lat_b - lat_center) * mpd_lat
+
+            dx, dz = xb - xa, zb - za
+            length = math.hypot(dx, dz)
+            if length < 0.5:
+                continue
+
+            # Vector perpendicular al segmento × half_width
+            px = -dz / length * half_w_m
+            pz =  dx / length * half_w_m
+
+            quad = [
+                [round(xa + px, 1), round(za + pz, 1)],
+                [round(xb + px, 1), round(zb + pz, 1)],
+                [round(xb - px, 1), round(zb - pz, 1)],
+                [round(xa - px, 1), round(za - pz, 1)],
+            ]
+            result.append(quad)
+
+    print(f"  Segmentos calle → Three.js: {len(result)} quads")
+    return result
+
+
 def apply_street_profile_from_poly(dem, lons, lats, street_poly,
                                     depth_m=1.5, ramp_m=7.0):
     """
@@ -2737,7 +2794,7 @@ def download_vendors():
 #  8. GENERACIÓN DEL HTML
 # ─────────────────────────────────────────────────────────────
 
-def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center):
+def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center, street_poly_data=None):
     """
     Genera el HTML autocontenido con Three.js.
     - Curvas de nivel: visibles en 3D (sobre la superficie del terreno)
@@ -2760,8 +2817,8 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
 
     # Serializar datos para JS
     # Curvas de nivel: se muestran en 3D | Rutas GPS: solo para DEM, no se muestran
-    heights_json     = json.dumps(dem_data["heights"])
-    street_mask_json = json.dumps(dem_data.get("streetMask", []))
+    heights_json      = json.dumps(dem_data["heights"])
+    street_poly_json  = json.dumps(street_poly_data or [])
     contours_json  = json.dumps(contours_3d)
     rivers_json    = json.dumps(rivers_3d)
     drainage_json  = json.dumps(drainage_pts_3d)
@@ -3105,9 +3162,9 @@ const DEM = {{
   ny:      {dem_data['ny']},
   zMin:    {dem_data['z_min']},
   zMax:    {dem_data['z_max']},
-  heights:    {heights_json},
-  streetMask: {street_mask_json}
+  heights: {heights_json}
 }};
+const STREET_POLY_DATA = {street_poly_json};
 
 const CONTOURS       = {contours_json};
 const RIVERS         = {rivers_json};
@@ -4167,65 +4224,53 @@ for (const street of STREETS) {{
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 // ═══════════════════════════════════════════════════════════════
-//  OVERLAY DE COLOR DE CALLES
+//  OVERLAY DE COLOR DE CALLES  (geometría directa desde polígono)
 // ═══════════════════════════════════════════════════════════════
 let streetOverlayMesh = null;
 
-function buildStreetOverlay() {{
+function sampleDEMHeight(sx, sz) {{
+  const u = (sx + DEM.widthM  * 0.5) / DEM.widthM;
+  const v = (sz + DEM.heightM * 0.5) / DEM.heightM;
+  const i = Math.min(DEM.nx-1, Math.max(0, Math.round(u*(DEM.nx-1))));
+  const j = Math.min(DEM.ny-1, Math.max(0, Math.round(v*(DEM.ny-1))));
+  return DEM.heights[j*DEM.nx+i] || 0;
+}}
+
+function buildStreetPolyLayer() {{
   clearGroup(streetOverlayLayer);
   streetOverlayMesh = null;
-  if (!DEM.streetMask || DEM.streetMask.length === 0) return;
+  if (!STREET_POLY_DATA || !STREET_POLY_DATA.length) return;
 
-  const ny = DEM.ny, nx = DEM.nx;
-  const color   = new THREE.Color(viewerState.streetOverlayColor);
-  const opacity = viewerState.streetOverlayOpacity;
-  const ELEV_OFFSET = 0.10;
+  const ELEV_OFFSET = 0.25;
+  const allPos = [], allIdx = [];
+  let base = 0;
 
-  const positions = [];
-  const indices   = [];
-
-  for (let j = 0; j < ny; j++) {{
-    for (let i = 0; i < nx; i++) {{
-      const idx = j * nx + i;
-      const x = -DEM.widthM / 2 + i / (nx - 1) * DEM.widthM;
-      const y = DEM.heights[idx] + ELEV_OFFSET;
-      const z = -DEM.heightM / 2 + j / (ny - 1) * DEM.heightM;
-      positions.push(x, y, z);
+  // Cada entrada es un quad: [[x0,z0],[x1,z1],[x2,z2],[x3,z3]]
+  for (const quad of STREET_POLY_DATA) {{
+    for (const [x, z] of quad) {{
+      allPos.push(x, sampleDEMHeight(x, z) + ELEV_OFFSET, z);
     }}
+    // Dos triángulos: [0,1,2] y [0,2,3]
+    allIdx.push(base, base+1, base+2, base, base+2, base+3);
+    base += 4;
   }}
 
-  const THRESH = 0.08;
-  for (let j = 0; j < ny - 1; j++) {{
-    for (let i = 0; i < nx - 1; i++) {{
-      const a = j*nx+i, b = j*nx+i+1, c = (j+1)*nx+i, d = (j+1)*nx+i+1;
-      if (Math.max(DEM.streetMask[a], DEM.streetMask[b],
-                   DEM.streetMask[c], DEM.streetMask[d]) > THRESH) {{
-        indices.push(a, c, b);
-        indices.push(b, c, d);
-      }}
-    }}
-  }}
-
-  if (indices.length === 0) return;
-
+  if (!allIdx.length) return;
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(positions), 3));
-  geo.setIndex(indices);
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(allPos), 3));
+  geo.setIndex(allIdx);
   geo.computeVertexNormals();
-
   streetOverlayMesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({{
-    color,
-    transparent: true,
-    opacity,
-    polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -2,
+    color: new THREE.Color(viewerState.streetOverlayColor),
+    transparent: true, opacity: viewerState.streetOverlayOpacity,
+    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2,
+    side: THREE.DoubleSide,
   }}));
   streetOverlayMesh.renderOrder = 1;
   streetOverlayLayer.add(streetOverlayMesh);
 }}
 
-buildStreetOverlay();
+buildStreetPolyLayer();
 
 rebuildHydraulicLinks();
 
@@ -4604,9 +4649,9 @@ def main():
 
     # Preparar malla 3D desde DEM alta resolución
     print("\n[6g4] Preparando malla 3D ...")
-    streets_3d  = streets_to_threejs(raw_streets, lon_center, lat_center, dem, lons, lats)
-    dem_data    = prepare_dem_for_threejs(dem_vis, lons_vis, lats_vis, lon_center, lat_center)
-    dem_data["streetMask"] = street_mask   # overlay de color de calle en JS
+    streets_3d      = streets_to_threejs(raw_streets, lon_center, lat_center, dem, lons, lats)
+    dem_data        = prepare_dem_for_threejs(dem_vis, lons_vis, lats_vis, lon_center, lat_center)
+    street_poly_3d  = street_segments_to_threejs(raw_streets, lon_center, lat_center)
     contours_3d = contours_to_threejs(contours_dict, lon_center, lat_center, dem, lons, lats)
     rivers_3d   = rivers_to_threejs(raw_rivers, lon_center, lat_center, dem, lons, lats)
 
@@ -4660,7 +4705,8 @@ def main():
         dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d,
         hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d,
         streets_3d, buildings_3d,
-        tex_b64, catastro_b64, vendor_js, lon_center, lat_center
+        tex_b64, catastro_b64, vendor_js, lon_center, lat_center,
+        street_poly_data=street_poly_3d
     )
 
     html_size = len(html_content.encode("utf-8"))
