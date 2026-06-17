@@ -804,6 +804,110 @@ def apply_street_profile_dem(dem, lons, lats, streets,
     return dem, street_mask
 
 
+def build_street_polygons(streets, lat_center):
+    """
+    Construye un MultiPolygon unificado del área de calles en WGS84.
+    Cada segmento OSM se bufferiza por su ancho estimado según tipo de vía.
+    Retorna: shapely geometry (MultiPolygon/Polygon) o None si no hay calles.
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_center))
+    mpd_lat = 110540.0
+    avg_mpd = (mpd_lon + mpd_lat) / 2.0  # m/deg aproximado
+
+    HALF_WIDTH_M = {
+        "motorway": 7.0, "trunk": 6.0, "primary": 5.5,
+        "secondary": 4.5, "tertiary": 4.0,
+        "residential": 3.5, "living_street": 3.0,
+        "service": 2.5, "unclassified": 3.5,
+        "footway": 1.5, "path": 1.2, "cycleway": 1.5, "steps": 1.0,
+    }
+    DEFAULT_HW = 3.5
+
+    polys = []
+    for street in streets:
+        coords = street.get("coords", [])
+        if len(coords) < 2:
+            continue
+        hw = street.get("highway", "residential")
+        half_w_m = HALF_WIDTH_M.get(hw, DEFAULT_HW)
+        half_w_deg = half_w_m / avg_mpd
+        try:
+            ls = LineString(coords)
+            buf = ls.buffer(half_w_deg, cap_style=1, join_style=1, resolution=4)
+            if buf and not buf.is_empty:
+                polys.append(buf)
+        except Exception:
+            continue
+
+    if not polys:
+        return None
+    merged = unary_union(polys)
+    print(f"  Polígono calles: {len(polys)} segmentos mergeados → "
+          f"{len(getattr(merged, 'geoms', [merged]))} geometrías")
+    return merged
+
+
+def apply_street_profile_from_poly(dem, lons, lats, street_poly,
+                                    depth_m=1.5, ramp_m=7.0):
+    """
+    Excava el DEM usando el polígono de área de calles.
+    - Dentro del polígono: rebaje plano de depth_m (fondo de canal)
+    - Fuera del polígono, dentro de ramp_m: rampa lineal depth_m → 0
+    - Más allá: sin cambio
+    Retorna: (dem modificado, street_mask 0-1 lista para JS)
+    """
+    import numpy as _np
+    from shapely.geometry import Point
+    from shapely.prepared import prep
+
+    if street_poly is None or street_poly.is_empty:
+        return dem, []
+
+    ny, nx = dem.shape
+    lat_mid = (lats[0] + lats[-1]) / 2.0
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_mid))
+    mpd_lat = 110540.0
+    cell_m_x = (lons[-1] - lons[0]) / max(nx - 1, 1) * mpd_lon
+    cell_m_y = (lats[-1] - lats[0]) / max(ny - 1, 1) * mpd_lat
+    cell_m = (cell_m_x + cell_m_y) / 2.0
+
+    # Rasterizar: punto dentro del polígono de calle
+    prep_poly = prep(street_poly)
+    minx, miny, maxx, maxy = street_poly.bounds
+    inside = _np.zeros((ny, nx), dtype=bool)
+    for j, lat in enumerate(lats):
+        if lat < miny or lat > maxy:
+            continue
+        for i, lon in enumerate(lons):
+            if minx <= lon <= maxx and prep_poly.contains(Point(lon, lat)):
+                inside[j, i] = True
+
+    # Distance transform: distancia de celdas externas al borde del polígono (en píxeles)
+    try:
+        from scipy.ndimage import distance_transform_edt
+        dt_px = distance_transform_edt(~inside)
+        dt_m = dt_px * cell_m
+    except ImportError:
+        # Fallback sin scipy: solo interior plano, sin rampa
+        dt_m = _np.where(inside, 0.0, ramp_m + 1.0)
+
+    # Perfil: plano dentro, rampa fuera
+    ramp_off = _np.where(
+        inside,
+        float(depth_m),
+        _np.where(dt_m < ramp_m, depth_m * (1.0 - dt_m / ramp_m), 0.0)
+    )
+
+    n_cut = int((ramp_off > 0.01).sum())
+    street_mask = _np.flipud(ramp_off / depth_m).flatten().tolist()
+    print(f"  Perfil calle (poly): {n_cut} celdas  "
+          f"prof={depth_m}m  rampa={ramp_m}m  cel≈{cell_m:.1f}m")
+    return dem - ramp_off, street_mask
+
+
 # ─────────────────────────────────────────────────────────────
 #  4. TEXTURA SATELITAL
 # ─────────────────────────────────────────────────────────────
@@ -4455,6 +4559,9 @@ def main():
     print("\n[6e] Leyendo calles / red vial (OSM) ...")
     raw_streets = download_osm_streets(lon_min, lat_min, lon_max, lat_max)
 
+    print("\n[6e2] Construyendo polígonos de área de calles ...")
+    street_poly = build_street_polygons(raw_streets, lat_center)
+
     print("\n[6f] Armando red hidraulica preliminar ...")
     hydraulic_links = build_hydraulic_network(hydraulic_structures, raw_drain_pts, raw_streets)
 
@@ -4478,8 +4585,8 @@ def main():
                                  depth_m=2.5, half_width_m=4.0)
     dem_vis = raise_building_obstacles(dem_vis, lons_vis, lats_vis, raw_buildings,
                                        wall_height_m=2.0)
-    dem_vis, street_mask = apply_street_profile_dem(dem_vis, lons_vis, lats_vis, raw_streets,
-                                                    depth_m=1.5, core_half_m=3.5, ramp_half_m=10.0)
+    dem_vis, street_mask = apply_street_profile_from_poly(dem_vis, lons_vis, lats_vis,
+                                                          street_poly, depth_m=1.5, ramp_m=7.0)
     print(f"  DEM visual final: zMin={dem_vis.min():.1f}m  zMax={dem_vis.max():.1f}m")
 
     # Preparar malla 3D desde DEM alta resolución
