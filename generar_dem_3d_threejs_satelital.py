@@ -3187,6 +3187,9 @@ const presetStates = {{
 const uiBaseInputs = Array.from(document.querySelectorAll('input[name="base-mode"]'));
 const uiArrowDensity = document.getElementById('arrow-density');
 const uiArrowDensityLabel = document.getElementById('arrow-density-label');
+const uiStreetOverlayColor   = document.getElementById('street-overlay-color');
+const uiStreetOverlayOpacity = document.getElementById('street-overlay-opacity');
+const uiStreetOverlayOpacityLabel = document.getElementById('street-overlay-opacity-label');
 const uiFlowColor = document.getElementById('flow-color');
 const uiFlowRangeMin = document.getElementById('flow-range-min');
 const uiFlowRangeMax = document.getElementById('flow-range-max');
@@ -3710,6 +3713,21 @@ if (uiArrowDensity) {{
   }});
 }}
 
+if (uiStreetOverlayColor) {{
+  uiStreetOverlayColor.addEventListener('input', () => {{
+    viewerState.streetOverlayColor = uiStreetOverlayColor.value || '#3a3530';
+    if (streetOverlayMesh) streetOverlayMesh.material.color.set(viewerState.streetOverlayColor);
+  }});
+}}
+if (uiStreetOverlayOpacity) {{
+  uiStreetOverlayOpacity.addEventListener('input', () => {{
+    viewerState.streetOverlayOpacity = clamp((Number(uiStreetOverlayOpacity.value) || 90) / 100, 0, 1);
+    if (uiStreetOverlayOpacityLabel)
+      uiStreetOverlayOpacityLabel.textContent = `${{Math.round(viewerState.streetOverlayOpacity * 100)}}%`;
+    if (streetOverlayMesh) streetOverlayMesh.material.opacity = viewerState.streetOverlayOpacity;
+  }});
+}}
+
 if (uiFlowColor) {{
   uiFlowColor.addEventListener('input', () => {{
     viewerState.flowColor = uiFlowColor.value || '#ffe080';
@@ -4030,6 +4048,68 @@ for (const street of STREETS) {{
 // ═══════════════════════════════════════════════════════════════
 //  EDIFICIOS 3D (OPEN BUILDINGS)
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+// ═══════════════════════════════════════════════════════════════
+//  OVERLAY DE COLOR DE CALLES
+// ═══════════════════════════════════════════════════════════════
+let streetOverlayMesh = null;
+
+function buildStreetOverlay() {{
+  clearGroup(streetOverlayLayer);
+  streetOverlayMesh = null;
+  if (!DEM.streetMask || DEM.streetMask.length === 0) return;
+
+  const ny = DEM.ny, nx = DEM.nx;
+  const color   = new THREE.Color(viewerState.streetOverlayColor);
+  const opacity = viewerState.streetOverlayOpacity;
+  const ELEV_OFFSET = 0.10;
+
+  const positions = [];
+  const indices   = [];
+
+  for (let j = 0; j < ny; j++) {{
+    for (let i = 0; i < nx; i++) {{
+      const idx = j * nx + i;
+      const x = -DEM.widthM / 2 + i / (nx - 1) * DEM.widthM;
+      const y = DEM.heights[idx] + ELEV_OFFSET;
+      const z = -DEM.heightM / 2 + j / (ny - 1) * DEM.heightM;
+      positions.push(x, y, z);
+    }}
+  }}
+
+  const THRESH = 0.08;
+  for (let j = 0; j < ny - 1; j++) {{
+    for (let i = 0; i < nx - 1; i++) {{
+      const a = j*nx+i, b = j*nx+i+1, c = (j+1)*nx+i, d = (j+1)*nx+i+1;
+      if (Math.max(DEM.streetMask[a], DEM.streetMask[b],
+                   DEM.streetMask[c], DEM.streetMask[d]) > THRESH) {{
+        indices.push(a, c, b);
+        indices.push(b, c, d);
+      }}
+    }}
+  }}
+
+  if (indices.length === 0) return;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(positions), 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+
+  streetOverlayMesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({{
+    color,
+    transparent: true,
+    opacity,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -2,
+  }}));
+  streetOverlayMesh.renderOrder = 1;
+  streetOverlayLayer.add(streetOverlayMesh);
+}}
+
+buildStreetOverlay();
+
 rebuildHydraulicLinks();
 
 for (const node of HYDRAULIC_NODES) {{
