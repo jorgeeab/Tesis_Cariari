@@ -885,26 +885,39 @@ def apply_street_profile_from_poly(dem, lons, lats, street_poly,
             if minx <= lon <= maxx and prep_poly.contains(Point(lon, lat)):
                 inside[j, i] = True
 
-    # Distance transform: distancia de celdas externas al borde del polígono (en píxeles)
+    # Distance transforms en píxeles
     try:
-        from scipy.ndimage import distance_transform_edt
-        dt_px = distance_transform_edt(~inside)
-        dt_m = dt_px * cell_m
+        from scipy.ndimage import distance_transform_edt, gaussian_filter
+        dt_out_px = distance_transform_edt(~inside)   # distancia exterior→borde
+        dt_in_px  = distance_transform_edt(inside)    # distancia interior→borde
+        dt_out_m  = dt_out_px * cell_m
+        dt_in_m   = dt_in_px  * cell_m
     except ImportError:
-        # Fallback sin scipy: solo interior plano, sin rampa
-        dt_m = _np.where(inside, 0.0, ramp_m + 1.0)
+        dt_out_m = _np.where(inside, 0.0, ramp_m + 1.0)
+        dt_in_m  = _np.where(inside, ramp_m, 0.0)
+        gaussian_filter = None
 
-    # Perfil: plano dentro, rampa fuera
-    ramp_off = _np.where(
-        inside,
-        float(depth_m),
-        _np.where(dt_m < ramp_m, depth_m * (1.0 - dt_m / ramp_m), 0.0)
-    )
+    # Perfil continuo de doble rampa — elimina aliasing en el límite del polígono:
+    #   exterior: depth_m → 0   en ramp_m metros desde el borde
+    #   interior: 0 → depth_m  en ramp_m*0.4 metros desde el borde
+    #   (el fondo plano se alcanza rápido adentro; transición suave en el límite)
+    inner_half = ramp_m * 0.4
+    outer_ramp = _np.where(dt_out_m < ramp_m,
+                           depth_m * (1.0 - dt_out_m / ramp_m), 0.0)
+    inner_ramp = _np.minimum(depth_m, depth_m * dt_in_m / max(inner_half, cell_m))
+    ramp_off   = _np.where(inside, inner_ramp, outer_ramp)
+
+    # Suavizado Gaussiano para eliminar el efecto de escalera de la rasterización binaria
+    sigma_px = 0.0
+    if gaussian_filter is not None:
+        sigma_px = max(1.0, ramp_m / cell_m * 0.25)   # ~25% del ancho de rampa en píxeles
+        ramp_off = gaussian_filter(ramp_off, sigma=sigma_px)
+        ramp_off = _np.maximum(ramp_off, 0.0)
 
     n_cut = int((ramp_off > 0.01).sum())
     street_mask = _np.flipud(ramp_off / depth_m).flatten().tolist()
     print(f"  Perfil calle (poly): {n_cut} celdas  "
-          f"prof={depth_m}m  rampa={ramp_m}m  cel≈{cell_m:.1f}m")
+          f"prof={depth_m}m  rampa={ramp_m}m  σ={sigma_px:.1f}px  cel≈{cell_m:.1f}m")
     return dem - ramp_off, street_mask
 
 
