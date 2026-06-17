@@ -4463,20 +4463,29 @@ def main():
     raw_buildings = read_open_buildings_geojson(OPEN_BUILDINGS_GEOJSON, lon_min, lat_min, lon_max, lat_max)
     buildings_3d = buildings_to_threejs(raw_buildings, lon_center, lat_center)
 
-    # Edificios sobre el DEM visual
+    # Edificios sobre el DEM de baja resolución (220×220, para lookups de elevación)
     print("\n[6g2] Aplicando edificios al DEM visual ...")
     dem = raise_building_obstacles(dem, lons, lats, raw_buildings, wall_height_m=2.0)
 
-    # Perfil trapezoidal de calles directo sobre el DEM (antes de preparar la malla)
-    print("\n[6g3] Aplicando perfil trapezoidal de calles al DEM ...")
-    dem, street_mask = apply_street_profile_dem(dem, lons, lats, raw_streets,
-                                                depth_m=1.5, core_half_m=3.5, ramp_half_m=10.0)
-    print(f"  DEM visual final: zMin={dem.min():.1f}m  zMax={dem.max():.1f}m")
+    # DEM visual de alta resolución (660×660) — sin cuadriculado en calles
+    print(f"\n[6g3] Construyendo DEM visual {GRID_RESOLUTION * FLOW_RESOLUTION_SCALE}×"
+          f"{GRID_RESOLUTION * FLOW_RESOLUTION_SCALE} para malla Three.js ...")
+    import numpy as _np_vis
+    lons_vis = _np_vis.linspace(lons[0], lons[-1], GRID_RESOLUTION * FLOW_RESOLUTION_SCALE)
+    lats_vis = _np_vis.linspace(lats[0], lats[-1], GRID_RESOLUTION * FLOW_RESOLUTION_SCALE)
+    dem_vis = upsample_dem_numpy(dem_base, FLOW_RESOLUTION_SCALE)
+    dem_vis = carve_river_canyon(dem_vis, lons_vis, lats_vis, raw_rivers,
+                                 depth_m=2.5, half_width_m=4.0)
+    dem_vis = raise_building_obstacles(dem_vis, lons_vis, lats_vis, raw_buildings,
+                                       wall_height_m=2.0)
+    dem_vis, street_mask = apply_street_profile_dem(dem_vis, lons_vis, lats_vis, raw_streets,
+                                                    depth_m=1.5, core_half_m=3.5, ramp_half_m=10.0)
+    print(f"  DEM visual final: zMin={dem_vis.min():.1f}m  zMax={dem_vis.max():.1f}m")
 
-    # Preparar malla 3D desde DEM modificado (ríos + edificios + calles)
+    # Preparar malla 3D desde DEM alta resolución
     print("\n[6g4] Preparando malla 3D ...")
     streets_3d  = streets_to_threejs(raw_streets, lon_center, lat_center, dem, lons, lats)
-    dem_data    = prepare_dem_for_threejs(dem, lons, lats, lon_center, lat_center)
+    dem_data    = prepare_dem_for_threejs(dem_vis, lons_vis, lats_vis, lon_center, lat_center)
     dem_data["streetMask"] = street_mask   # overlay de color de calle en JS
     contours_3d = contours_to_threejs(contours_dict, lon_center, lat_center, dem, lons, lats)
     rivers_3d   = rivers_to_threejs(raw_rivers, lon_center, lat_center, dem, lons, lats)
