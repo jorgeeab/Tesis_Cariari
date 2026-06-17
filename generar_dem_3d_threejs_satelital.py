@@ -735,34 +735,35 @@ def carve_street_channels(dem, lons, lats, streets,
     return dem
 
 
-def apply_street_channels_post_dem(dem_data, lons, lats, streets,
-                                    depth_m=1.5, half_width_m=4.0):
+def apply_street_profile_dem(dem, lons, lats, streets,
+                              depth_m=1.5, core_half_m=3.5, ramp_half_m=10.0):
     """
-    Aplica cortes rectangulares de calle sobre el array de alturas ya preparado
-    para Three.js (post-DEM). Perfil recto tipo contenedor: paredes verticales,
-    fondo plano. Opera sobre dem_data['heights'] sin tocar el DEM original.
+    Perfil trapezoidal de calle directamente sobre el array DEM numpy (antes de
+    prepare_dem_for_threejs). El terreno mismo forma el canal — sin geometría 3D
+    separada.
+
+    Perfil en sección transversal:
+        d < core_half_m              → baja depth_m completo (fondo plano)
+        core_half_m ≤ d < ramp_half_m → rampa lineal de depth_m a 0 (orillas)
+        d ≥ ramp_half_m              → sin modificación
     """
     if not streets:
-        return dem_data
+        return dem
 
     import numpy as _np
 
-    ny = dem_data["ny"]
-    nx = dem_data["nx"]
-    heights = _np.array(dem_data["heights"]).reshape(ny, nx)
-
+    ny, nx = dem.shape
     lat_c = (lats[0] + lats[-1]) / 2.0
     lon_c = (lons[0] + lons[-1]) / 2.0
     mpd_lon = 111320.0 * math.cos(math.radians(lat_c))
     mpd_lat = 110540.0
 
-    # Coordenadas de escena para cada celda (flipud: fila 0 = lat_max)
-    lats_flip = lats[::-1]
-    XX = (lons   - lon_c) * mpd_lon   # (nx,)
-    ZZ = (lats_flip - lat_c) * mpd_lat  # (ny,)
+    XX = (lons - lon_c) * mpd_lon   # (nx,)
+    ZZ = (lats - lat_c) * mpd_lat   # (ny,) — orden normal, igual que dem[j,i]
     XX2d, ZZ2d = _np.meshgrid(XX, ZZ)  # (ny, nx)
 
-    mask = _np.zeros((ny, nx), dtype=bool)
+    # Acumular el rebaje máximo en cada celda (varias calles pueden solapar)
+    offset = _np.zeros((ny, nx), dtype=float)
 
     for street in streets:
         pts = street.get("coords", [])
@@ -778,16 +779,24 @@ def apply_street_channels_post_dem(dem_data, lons, lats, streets,
             else:
                 t = _np.clip(((XX2d - ax)*dx + (ZZ2d - az)*dz) / len2, 0.0, 1.0)
                 d = _np.sqrt((XX2d - (ax + t*dx))**2 + (ZZ2d - (az + t*dz))**2)
-            mask |= (d <= half_width_m)
 
-    n_cut = int(mask.sum())
-    heights[mask] -= depth_m * Z_EXAG
-    print(f"  Canales post-DEM: {n_cut} vértices "
-          f"(prof. {depth_m} m, ancho ±{half_width_m} m, perfil recto)")
+            # Perfil trapezoidal
+            seg_off = _np.where(
+                d < core_half_m,
+                depth_m,                                           # fondo plano
+                _np.where(
+                    d < ramp_half_m,
+                    depth_m * (ramp_half_m - d) / (ramp_half_m - core_half_m),  # rampa
+                    0.0
+                )
+            )
+            offset = _np.maximum(offset, seg_off)
 
-    result = dict(dem_data)
-    result["heights"] = heights.flatten().tolist()
-    return result
+    n_cut = int((offset > 0.01).sum())
+    dem = dem - offset
+    print(f"  Perfil calle en DEM: {n_cut} celdas modificadas "
+          f"(prof. {depth_m} m, core ±{core_half_m} m, rampa ±{ramp_half_m} m)")
+    return dem
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2606,7 +2615,7 @@ def download_vendors():
 #  8. GENERACIÓN DEL HTML
 # ─────────────────────────────────────────────────────────────
 
-def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, street_channel_data, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center):
+def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center):
     """
     Genera el HTML autocontenido con Three.js.
     - Curvas de nivel: visibles en 3D (sobre la superficie del terreno)
@@ -2636,9 +2645,8 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     hydraulic_nodes_json = json.dumps(hydraulic_nodes_3d)
     hydraulic_links_json = json.dumps(hydraulic_links_3d)
     green_json     = json.dumps(green_zones_2d)
-    streets_json        = json.dumps(streets_3d)
-    street_channel_json = json.dumps(street_channel_data)
-    buildings_json      = json.dumps(buildings_3d)
+    streets_json   = json.dumps(streets_3d)
+    buildings_json = json.dumps(buildings_3d)
     curtain_json   = json.dumps(curtain) if curtain else "null"
     hydrology_json = json.dumps(hydrology_data)
 
@@ -2865,7 +2873,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
 
   <div class="layer-subtitle">Contenido</div>
   <label class="layer-row"><input id="toggle-streets" type="checkbox" checked>Calles (líneas)</label>
-  <label class="layer-row"><input id="toggle-street-channels" type="checkbox" checked>Canales de calle</label>
+
   <label class="layer-row"><input id="toggle-buildings" type="checkbox" checked>Edificios 3D</label>
   <div class="layer-row layer-row--stack">
     <span>Paleta muros</span>
@@ -2974,9 +2982,8 @@ const DRAINAGE_PTS   = {drainage_json};
 const HYDRAULIC_NODES = {hydraulic_nodes_json};
 const HYDRAULIC_LINKS = {hydraulic_links_json};
 const GREEN_ZONES    = {green_json};
-const STREETS        = {streets_json};
-const STREET_CHANNELS = {street_channel_json};
-const BUILDINGS      = {buildings_json};
+const STREETS   = {streets_json};
+const BUILDINGS = {buildings_json};
 const CURTAIN        = {curtain_json};
 const HYDROLOGY      = {hydrology_json};
 const HAS_TEX        = {'true' if has_texture else 'false'};
@@ -3029,7 +3036,6 @@ const curtainLayer = new THREE.Group();
 const contourLayer = new THREE.Group();
 const riverLayer = new THREE.Group();
 const streetLayer = new THREE.Group();
-const streetChannelLayer = new THREE.Group();
 const buildingLayer = new THREE.Group();
 const hydraulicNodeLayer = new THREE.Group();
 const hydraulicLinkLayer = new THREE.Group();
@@ -3040,7 +3046,7 @@ const flowArrowLayer = new THREE.Group();
 
 for (const layer of [
   baseTerrainLayer, catastroLayer, gridLayer, curtainLayer, contourLayer,
-  riverLayer, streetLayer, streetChannelLayer, buildingLayer, hydraulicNodeLayer, hydraulicLinkLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
+  riverLayer, streetLayer, buildingLayer, hydraulicNodeLayer, hydraulicLinkLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
 ]) {{
   scene.add(layer);
 }}
@@ -3049,7 +3055,6 @@ const layerGroups = {{
   contours: contourLayer,
   rivers: riverLayer,
   streets: streetLayer,
-  streetChannels: streetChannelLayer,
   buildings: buildingLayer,
   hydraulicNodes: hydraulicNodeLayer,
   hydraulicLinks: hydraulicLinkLayer,
@@ -3079,7 +3084,6 @@ const viewerState = {{
   contours: false,
   rivers: false,
   streets: false,
-  streetChannels: true,
   buildings: true,
   hydraulicNodes: true,
   hydraulicLinks: true,
@@ -3186,7 +3190,6 @@ const hydraulicLinkLegendSwatch = document.getElementById('hydraulic-link-legend
 const arrowCountStat = document.getElementById('arrow-count-stat');
 const uiToggles = {{
   streets: document.getElementById('toggle-streets'),
-  streetChannels: document.getElementById('toggle-street-channels'),
   buildings: document.getElementById('toggle-buildings'),
   hydraulicNodes: document.getElementById('toggle-hydraulic-nodes'),
   rivers: document.getElementById('toggle-rivers'),
@@ -4001,84 +4004,6 @@ for (const street of STREETS) {{
   streetLayer.add(new THREE.Line(geo, mat));
 }}
 
-// ═══════════════════════════════════════════════════════════════
-//  CANALES DE CALLE — geometría U (paredes 90°, grosor exacto)
-// ═══════════════════════════════════════════════════════════════
-(function buildStreetChannels() {{
-  const HW = 6.5;    // semi-ancho del canal (metres escena) — ajustado a half_width DEM
-  const D  = 1.5;    // profundidad del canal (metros)
-  const EPS = 0.12;  // epsilon para evitar z-fighting con malla de terreno
-
-  const verts = [];
-  const idxs  = [];
-
-  // STREET_CHANNELS tiene coords XZ y la Y muestreada del DEM original (antes de excavar)
-  // => Y_original = H (nivel del terreno sin modificar)
-  // => top  = H + EPS   (ras del terreno exterior, cubre la malla bajo el canal)
-  // => piso = H - D + EPS (fondo del canal, visible donde el DEM SÍ quedó excavado)
-  for (const street of STREET_CHANNELS) {{
-    const pts = street.points;  // [[sx, H_original, sz], ...]
-    if (!pts || pts.length < 2) continue;
-
-    for (let k = 1; k < pts.length; k++) {{
-      const ax = pts[k-1][0], ay_orig = pts[k-1][1], az = pts[k-1][2];
-      const bx = pts[k][0],   by_orig = pts[k][1],   bz = pts[k][2];
-
-      const ay_top = ay_orig + EPS;        // tapa: nivel original del terreno
-      const by_top = by_orig + EPS;
-      const ay_bot = ay_orig - D + EPS;    // piso del canal
-      const by_bot = by_orig - D + EPS;
-
-      // Vector tangente en plano XZ
-      let tx = bx - ax, tz = bz - az;
-      const tl = Math.sqrt(tx*tx + tz*tz);
-      if (tl < 0.5) continue;
-      tx /= tl; tz /= tl;
-
-      // Perpendicular horizontal (+90° en XZ)
-      const px = -tz, pz = tx;
-
-      // 8 vértices del prisma: A-izq-top, A-izq-bot, A-der-bot, A-der-top
-      //                        B-izq-top, B-izq-bot, B-der-bot, B-der-top
-      const b = verts.length / 3;
-      verts.push(ax - HW*px, ay_top, az - HW*pz);   // 0
-      verts.push(ax - HW*px, ay_bot, az - HW*pz);   // 1
-      verts.push(ax + HW*px, ay_bot, az + HW*pz);   // 2
-      verts.push(ax + HW*px, ay_top, az + HW*pz);   // 3
-      verts.push(bx - HW*px, by_top, bz - HW*pz);   // 4
-      verts.push(bx - HW*px, by_bot, bz - HW*pz);   // 5
-      verts.push(bx + HW*px, by_bot, bz + HW*pz);   // 6
-      verts.push(bx + HW*px, by_top, bz + HW*pz);   // 7
-
-      // Pared izquierda: 0-1-5-4
-      idxs.push(b+0, b+1, b+5,  b+0, b+5, b+4);
-      // Piso: 1-2-6-5
-      idxs.push(b+1, b+2, b+6,  b+1, b+6, b+5);
-      // Pared derecha: 2-3-7-6
-      idxs.push(b+2, b+3, b+7,  b+2, b+7, b+6);
-      // Tapa superior (cara de asfalto): 0-3-7-4 — cubre la malla del terreno debajo
-      idxs.push(b+0, b+3, b+7,  b+0, b+7, b+4);
-    }}
-  }}
-
-  if (verts.length === 0) return;
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(verts), 3));
-  geo.setIndex(idxs);
-  geo.computeVertexNormals();
-
-  const mat = new THREE.MeshLambertMaterial({{
-    color: 0x4a4030,
-    side: THREE.DoubleSide,  // normales de tapa varían por dirección del segmento
-    polygonOffset: true,
-    polygonOffsetFactor: -2,
-    polygonOffsetUnits: -4,
-  }});
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.renderOrder = 1;   // rasterizar después del terreno
-  streetChannelLayer.add(mesh);
-}})();
 
 // ═══════════════════════════════════════════════════════════════
 //  EDIFICIOS 3D (OPEN BUILDINGS)
@@ -4427,9 +4352,6 @@ def main():
     # Calles / red vial OSM
     print("\n[6e] Leyendo calles / red vial (OSM) ...")
     raw_streets = download_osm_streets(lon_min, lat_min, lon_max, lat_max)
-    streets_3d = streets_to_threejs(raw_streets, lon_center, lat_center, dem, lons, lats)
-    # Datos de canal con elevación exacta del DEM (sin offset, para geometría U)
-    street_channel_data = prepare_street_channel_data(raw_streets, lon_center, lat_center, dem, lons, lats)
 
     print("\n[6f] Armando red hidraulica preliminar ...")
     hydraulic_links = build_hydraulic_network(hydraulic_structures, raw_drain_pts, raw_streets)
@@ -4439,22 +4361,22 @@ def main():
     raw_buildings = read_open_buildings_geojson(OPEN_BUILDINGS_GEOJSON, lon_min, lat_min, lon_max, lat_max)
     buildings_3d = buildings_to_threejs(raw_buildings, lon_center, lat_center)
 
-    # Edificios sobre el DEM visual (directo, sin suavizado)
+    # Edificios sobre el DEM visual
     print("\n[6g2] Aplicando edificios al DEM visual ...")
     dem = raise_building_obstacles(dem, lons, lats, raw_buildings, wall_height_m=2.0)
-    print(f"  DEM visual (sin calles): zMin={dem.min():.1f}m  zMax={dem.max():.1f}m")
 
-    # Preparar malla 3D desde DEM limpio (sin calles)
-    print("\n[6g3] Preparando malla 3D ...")
+    # Perfil trapezoidal de calles directo sobre el DEM (antes de preparar la malla)
+    print("\n[6g3] Aplicando perfil trapezoidal de calles al DEM ...")
+    dem = apply_street_profile_dem(dem, lons, lats, raw_streets,
+                                   depth_m=1.5, core_half_m=3.5, ramp_half_m=10.0)
+    print(f"  DEM visual final: zMin={dem.min():.1f}m  zMax={dem.max():.1f}m")
+
+    # Preparar malla 3D desde DEM modificado (ríos + edificios + calles)
+    print("\n[6g4] Preparando malla 3D ...")
+    streets_3d  = streets_to_threejs(raw_streets, lon_center, lat_center, dem, lons, lats)
     dem_data    = prepare_dem_for_threejs(dem, lons, lats, lon_center, lat_center)
     contours_3d = contours_to_threejs(contours_dict, lon_center, lat_center, dem, lons, lats)
     rivers_3d   = rivers_to_threejs(raw_rivers, lon_center, lat_center, dem, lons, lats)
-
-    # Cortes de calle POST-DEM sobre el array de alturas (perfil recto, paredes verticales)
-    print("\n[6g4] Aplicando cortes de calle post-DEM (perfil rectangular) ...")
-    dem_data = apply_street_channels_post_dem(
-        dem_data, lons, lats, raw_streets, depth_m=1.5, half_width_m=7.0
-    )
 
     # Hidrología en alta resolución
     # Parte del DEM BASE (sin ríos ni edificios), aplica los tres capas a 660×660
@@ -4505,7 +4427,7 @@ def main():
     html_content = make_html(
         dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d,
         hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d,
-        streets_3d, street_channel_data, buildings_3d,
+        streets_3d, buildings_3d,
         tex_b64, catastro_b64, vendor_js, lon_center, lat_center
     )
 
