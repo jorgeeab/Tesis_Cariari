@@ -45,6 +45,7 @@ if hasattr(sys.stderr, "reconfigure"):
 #  CONFIGURACIÓN
 # ─────────────────────────────────────────────────────────────
 GRID_RESOLUTION    = 220        # resolución de la malla DEM (NxN)
+FLOW_RESOLUTION_SCALE = 3       # multiplicador para hidrología fina (3 → 660×660)
 IDW_POWER          = 1.4        # potencia de la IDW
 IDW_NEIGHBORS      = 20         # vecinos para IDW
 SMOOTH_PASSES      = 1          # pasadas de suavizado 3×3
@@ -559,6 +560,235 @@ def build_dem(gps_routes, contours_dict, lon_min, lat_min, lon_max, lat_max, ext
     dem = smooth_dem(dem, SMOOTH_PASSES)
     print(f"  DEM: min={dem.min():.1f}m  max={dem.max():.1f}m")
     return dem, lons, lats
+
+
+def carve_river_canyon(dem, lons, lats, rivers,
+                       depth_m=2.5, half_width_m=10.0):
+    """
+    Talla un cauce en el DEM siguiendo las líneas de río de Cauce.shp.
+    Aplica una depresión Gaussiana: profunda en el centro, se atenúa lateralmente.
+    Garantiza que el flujo calculado converja hacia el cauce real.
+
+    depth_m       : profundidad máxima del cauce respecto al terreno circundante
+    half_width_m  : distancia lateral (metros) a la que la depresión cae al 60%
+    """
+    if not rivers:
+        return dem
+
+    ny, nx = dem.shape
+    lat_mid = (lats[0] + lats[-1]) / 2.0
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_mid))
+    mpd_lat = 110540.0
+
+    lon_step = (lons[-1] - lons[0]) / max(nx - 1, 1)
+    lat_step = (lats[-1] - lats[0]) / max(ny - 1, 1)
+
+    # Radio en celdas para el kernel Gaussiano
+    r_lon = max(1, int(half_width_m / (lon_step * mpd_lon)) + 2)
+    r_lat = max(1, int(half_width_m / (lat_step * mpd_lat)) + 2)
+
+    cells_carved = 0
+    for seg in rivers:
+        for k in range(len(seg) - 1):
+            lon_a, lat_a = seg[k]
+            lon_b, lat_b = seg[k + 1]
+            seg_m = math.hypot((lon_b - lon_a) * mpd_lon,
+                               (lat_b - lat_a) * mpd_lat)
+            n_samp = max(2, int(seg_m / (lon_step * mpd_lon * 0.4)))
+
+            for s in range(n_samp):
+                t = s / max(1, n_samp - 1)
+                lon_c = lon_a + t * (lon_b - lon_a)
+                lat_c = lat_a + t * (lat_b - lat_a)
+
+                i_c = int((lon_c - lons[0]) / (lons[-1] - lons[0]) * (nx - 1))
+                j_c = int((lat_c - lats[0]) / (lats[-1] - lats[0]) * (ny - 1))
+                i_c = max(0, min(nx - 1, i_c))
+                j_c = max(0, min(ny - 1, j_c))
+
+                for dj in range(-r_lat, r_lat + 1):
+                    for di in range(-r_lon, r_lon + 1):
+                        ii = i_c + di
+                        jj = j_c + dj
+                        if not (0 <= ii < nx and 0 <= jj < ny):
+                            continue
+                        d_m = math.hypot((lons[ii] - lon_c) * mpd_lon,
+                                         (lats[jj] - lat_c) * mpd_lat)
+                        depression = depth_m * math.exp(
+                            -0.5 * (d_m / half_width_m) ** 2)
+                        if depression > 0.05:
+                            dem[jj, ii] -= depression
+                            cells_carved += 1
+
+    print(f"  Cauce tallado: {cells_carved} celdas "
+          f"(prof. max {depth_m} m, ancho ±{half_width_m} m)")
+    return dem
+
+
+def raise_building_obstacles(dem, lons, lats, buildings, wall_height_m=3.5):
+    """
+    Eleva el DEM dentro de la huella de cada edificio.
+    El flujo superficial calculado rodeará los edificios en lugar de atravesarlos.
+
+    wall_height_m : metros añadidos sobre la cota natural del terreno en cada edificio
+    """
+    if not buildings:
+        return dem
+
+    try:
+        from shapely.geometry import Point as _Pt, Polygon as _Poly
+    except ImportError:
+        print("  AVISO: shapely no disponible, omitiendo obstáculos de edificios")
+        return dem
+
+    ny, nx = dem.shape
+    cells_raised = 0
+
+    for bld in buildings:
+        outer = bld.get("outer", [])
+        if len(outer) < 3:
+            continue
+        try:
+            poly = _Poly(outer)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+        except Exception:
+            continue
+
+        min_lon, min_lat, max_lon, max_lat = poly.bounds
+        i0 = max(0, int((min_lon - lons[0]) / (lons[-1] - lons[0]) * (nx - 1)) - 1)
+        i1 = min(nx - 1, int((max_lon - lons[0]) / (lons[-1] - lons[0]) * (nx - 1)) + 1)
+        j0 = max(0, int((min_lat - lats[0]) / (lats[-1] - lats[0]) * (ny - 1)) - 1)
+        j1 = min(ny - 1, int((max_lat - lats[0]) / (lats[-1] - lats[0]) * (ny - 1)) + 1)
+
+        for jj in range(j0, j1 + 1):
+            for ii in range(i0, i1 + 1):
+                if poly.contains(_Pt(lons[ii], lats[jj])):
+                    dem[jj, ii] += wall_height_m
+                    cells_raised += 1
+
+    print(f"  Obstáculos edificios: {cells_raised} celdas elevadas "
+          f"+{wall_height_m} m ({len(buildings)} edificios)")
+    return dem
+
+
+def carve_street_channels(dem, lons, lats, streets,
+                          depth_m=0.4, half_width_m=2.0):
+    """
+    Talla un pequeño canal a lo largo de cada calle del DEM de flujo.
+    Perfil muy estrecho y fijo (casi rectangular) para guiar el agua
+    por las calles sin deformar el terreno visual.
+
+    Aplicar al dem visual (visible en malla) y al dem_flow (guía de flujo).
+
+    depth_m       : rebaje máximo en el centro de la calle (m)
+    half_width_m  : semi-ancho del canal (m) — muy pequeño para que sea preciso
+    """
+    if not streets:
+        return dem
+
+    ny, nx = dem.shape
+    lat_mid = (lats[0] + lats[-1]) / 2.0
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_mid))
+    mpd_lat = 110540.0
+
+    lon_step = (lons[-1] - lons[0]) / max(nx - 1, 1)
+    lat_step = (lats[-1] - lats[0]) / max(ny - 1, 1)
+
+    r_lon = max(1, int(half_width_m / (lon_step * mpd_lon)) + 1)
+    r_lat = max(1, int(half_width_m / (lat_step * mpd_lat)) + 1)
+
+    cells_carved = 0
+    for seg in streets:
+        coords = seg.get("coords", [])
+        for k in range(len(coords) - 1):
+            lon_a, lat_a = coords[k]
+            lon_b, lat_b = coords[k + 1]
+            seg_m = math.hypot((lon_b - lon_a) * mpd_lon,
+                               (lat_b - lat_a) * mpd_lat)
+            n_samp = max(2, int(seg_m / (lon_step * mpd_lon * 0.5)))
+
+            for s in range(n_samp):
+                t = s / max(1, n_samp - 1)
+                lon_c = lon_a + t * (lon_b - lon_a)
+                lat_c = lat_a + t * (lat_b - lat_a)
+
+                i_c = int((lon_c - lons[0]) / (lons[-1] - lons[0]) * (nx - 1))
+                j_c = int((lat_c - lats[0]) / (lats[-1] - lats[0]) * (ny - 1))
+                i_c = max(0, min(nx - 1, i_c))
+                j_c = max(0, min(ny - 1, j_c))
+
+                for dj in range(-r_lat, r_lat + 1):
+                    for di in range(-r_lon, r_lon + 1):
+                        ii = i_c + di
+                        jj = j_c + dj
+                        if not (0 <= ii < nx and 0 <= jj < ny):
+                            continue
+                        d_m = math.hypot((lons[ii] - lon_c) * mpd_lon,
+                                         (lats[jj] - lat_c) * mpd_lat)
+                        if d_m <= half_width_m:
+                            dem[jj, ii] -= depth_m
+                            cells_carved += 1
+
+    print(f"  Canales calles: {cells_carved} celdas "
+          f"(prof. {depth_m} m, ancho ±{half_width_m} m, {len(streets)} segmentos)")
+    return dem
+
+
+def apply_street_channels_post_dem(dem_data, lons, lats, streets,
+                                    depth_m=1.5, half_width_m=4.0):
+    """
+    Aplica cortes rectangulares de calle sobre el array de alturas ya preparado
+    para Three.js (post-DEM). Perfil recto tipo contenedor: paredes verticales,
+    fondo plano. Opera sobre dem_data['heights'] sin tocar el DEM original.
+    """
+    if not streets:
+        return dem_data
+
+    import numpy as _np
+
+    ny = dem_data["ny"]
+    nx = dem_data["nx"]
+    heights = _np.array(dem_data["heights"]).reshape(ny, nx)
+
+    lat_c = (lats[0] + lats[-1]) / 2.0
+    lon_c = (lons[0] + lons[-1]) / 2.0
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_c))
+    mpd_lat = 110540.0
+
+    # Coordenadas de escena para cada celda (flipud: fila 0 = lat_max)
+    lats_flip = lats[::-1]
+    XX = (lons   - lon_c) * mpd_lon   # (nx,)
+    ZZ = (lats_flip - lat_c) * mpd_lat  # (ny,)
+    XX2d, ZZ2d = _np.meshgrid(XX, ZZ)  # (ny, nx)
+
+    mask = _np.zeros((ny, nx), dtype=bool)
+
+    for street in streets:
+        pts = street.get("coords", [])
+        for k in range(len(pts) - 1):
+            ax = (pts[k][0]   - lon_c) * mpd_lon
+            az = (pts[k][1]   - lat_c) * mpd_lat
+            bx = (pts[k+1][0] - lon_c) * mpd_lon
+            bz = (pts[k+1][1] - lat_c) * mpd_lat
+            dx, dz = bx - ax, bz - az
+            len2 = dx*dx + dz*dz
+            if len2 < 1e-10:
+                d = _np.sqrt((XX2d - ax)**2 + (ZZ2d - az)**2)
+            else:
+                t = _np.clip(((XX2d - ax)*dx + (ZZ2d - az)*dz) / len2, 0.0, 1.0)
+                d = _np.sqrt((XX2d - (ax + t*dx))**2 + (ZZ2d - (az + t*dz))**2)
+            mask |= (d <= half_width_m)
+
+    n_cut = int(mask.sum())
+    heights[mask] -= depth_m * Z_EXAG
+    print(f"  Canales post-DEM: {n_cut} vértices "
+          f"(prof. {depth_m} m, ancho ±{half_width_m} m, perfil recto)")
+
+    result = dict(dem_data)
+    result["heights"] = heights.flatten().tolist()
+    return result
+
 
 # ─────────────────────────────────────────────────────────────
 #  4. TEXTURA SATELITAL
@@ -1863,6 +2093,48 @@ def download_catastro_overlay(lon_min, lat_min, lon_max, lat_max):
         return None
 
 
+def prepare_street_channel_data(streets, lon_center, lat_center, dem, lons, lats):
+    """
+    Genera datos de línea central del canal con elevación EXACTA del DEM (sin offset).
+    Usar el DEM visual ANTES de apply_street_channels_post_dem para que el tope
+    del canal coincida con la superficie del terreno original.
+    """
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_center))
+    mpd_lat = 110540.0
+    ny, nx = dem.shape
+    lon_min, lon_max = lons[0], lons[-1]
+    lat_min, lat_max = lats[0], lats[-1]
+
+    def sample_dem_exact(lon, lat):
+        fi = (lon - lon_min) / (lon_max - lon_min) * (nx - 1)
+        fj = (lat - lat_min) / (lat_max - lat_min) * (ny - 1)
+        # Bilineal para mayor precisión
+        i0 = int(np.clip(math.floor(fi), 0, nx - 2))
+        j0 = int(np.clip(math.floor(fj), 0, ny - 2))
+        i1, j1 = i0 + 1, j0 + 1
+        tx, ty = fi - i0, fj - j0
+        v = (dem[j0, i0] * (1-tx) * (1-ty) +
+             dem[j0, i1] * tx * (1-ty) +
+             dem[j1, i0] * (1-tx) * ty +
+             dem[j1, i1] * tx * ty)
+        return float(v) * Z_EXAG
+
+    skip = max(1, sum(len(s["coords"]) for s in streets) // 18000)
+    result = []
+    for street in streets:
+        pts = []
+        for k, (lon, lat) in enumerate(street["coords"]):
+            if k % skip != 0 and k != len(street["coords"]) - 1:
+                continue
+            sx = (lon - lon_center) * mpd_lon
+            sz = -(lat - lat_center) * mpd_lat
+            sy = sample_dem_exact(lon, lat)  # elevación exacta del DEM, sin offset
+            pts.append([round(sx, 2), round(sy, 2), round(sz, 2)])
+        if len(pts) >= 2:
+            result.append({"points": pts})
+    return result
+
+
 # ─────────────────────────────────────────────────────────────
 #  6. GENERACIÓN DE DATOS 3D PARA THREE.JS
 # ─────────────────────────────────────────────────────────────
@@ -1979,6 +2251,65 @@ def smooth_scalar_grid(grid, passes=1):
             + padded[2:, :-2] + 2.0 * padded[2:, 1:-1] + padded[2:, 2:]
         ) / 16.0
     return out
+
+
+def upsample_dem_numpy(dem, scale):
+    """Upsampling bilineal del DEM por factor entero para cálculo de flujo fino."""
+    if scale == 1:
+        return dem.copy()
+    ny, nx = dem.shape
+    new_ny, new_nx = ny * scale, nx * scale
+    y_new = np.linspace(0, ny - 1, new_ny)
+    x_new = np.linspace(0, nx - 1, new_nx)
+    y2, x2 = np.meshgrid(y_new, x_new, indexing='ij')
+    y0 = np.floor(y2).astype(int).clip(0, ny - 2)
+    x0 = np.floor(x2).astype(int).clip(0, nx - 2)
+    y1 = (y0 + 1).clip(0, ny - 1)
+    x1 = (x0 + 1).clip(0, nx - 1)
+    fy = y2 - y0
+    fx = x2 - x0
+    return (dem[y0, x0] * (1 - fy) * (1 - fx) +
+            dem[y0, x1] * (1 - fy) * fx +
+            dem[y1, x0] * fy * (1 - fx) +
+            dem[y1, x1] * fy * fx)
+
+
+def downsample_hydrology_data(hydro, target_ny, target_nx, scale):
+    """Reduce hidrología de alta resolución al tamaño del DEM visual."""
+    ny_hi = target_ny * scale
+    nx_hi = target_nx * scale
+
+    def blk_max(arr_flat):
+        return np.array(arr_flat).reshape(ny_hi, nx_hi) \
+                 .reshape(target_ny, scale, target_nx, scale) \
+                 .max(axis=(1, 3))
+
+    def blk_mean(arr_flat):
+        return np.array(arr_flat).reshape(ny_hi, nx_hi) \
+                  .reshape(target_ny, scale, target_nx, scale) \
+                  .mean(axis=(1, 3))
+
+    acc_ds = blk_max(hydro["accumulation"])
+    st_ds  = blk_max(hydro["arrow_strength"])
+    dx_ds  = blk_mean(hydro["arrow_dx"])
+    dz_ds  = blk_mean(hydro["arrow_dz"])
+
+    mag = np.sqrt(dx_ds**2 + dz_ds**2)
+    no_flow = mag < 1e-5
+    mag = np.where(no_flow, 1.0, mag)
+    dx_ds = np.where(no_flow, 0.0, dx_ds / mag)
+    dz_ds = np.where(no_flow, 0.0, dz_ds / mag)
+
+    return {
+        "accumulation":   np.round(acc_ds.ravel(), 4).tolist(),
+        "arrow_dx":       np.round(dx_ds.ravel(), 4).tolist(),
+        "arrow_dz":       np.round(dz_ds.ravel(), 4).tolist(),
+        "arrow_strength": np.round(st_ds.ravel(), 4).tolist(),
+        "max_accumulation": hydro["max_accumulation"],
+        "arrow_count":    int(np.sum(np.abs(dx_ds) + np.abs(dz_ds) > 1e-5)),
+        "sink_loads":     hydro["sink_loads"],
+        "sink_count":     hydro["sink_count"],
+    }
 
 
 def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None):
@@ -2275,7 +2606,7 @@ def download_vendors():
 #  8. GENERACIÓN DEL HTML
 # ─────────────────────────────────────────────────────────────
 
-def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center):
+def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, street_channel_data, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center):
     """
     Genera el HTML autocontenido con Three.js.
     - Curvas de nivel: visibles en 3D (sobre la superficie del terreno)
@@ -2305,8 +2636,9 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     hydraulic_nodes_json = json.dumps(hydraulic_nodes_3d)
     hydraulic_links_json = json.dumps(hydraulic_links_3d)
     green_json     = json.dumps(green_zones_2d)
-    streets_json   = json.dumps(streets_3d)
-    buildings_json = json.dumps(buildings_3d)
+    streets_json        = json.dumps(streets_3d)
+    street_channel_json = json.dumps(street_channel_data)
+    buildings_json      = json.dumps(buildings_3d)
     curtain_json   = json.dumps(curtain) if curtain else "null"
     hydrology_json = json.dumps(hydrology_data)
 
@@ -2532,7 +2864,8 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   </div>
 
   <div class="layer-subtitle">Contenido</div>
-  <label class="layer-row"><input id="toggle-streets" type="checkbox" checked>Calles</label>
+  <label class="layer-row"><input id="toggle-streets" type="checkbox" checked>Calles (líneas)</label>
+  <label class="layer-row"><input id="toggle-street-channels" type="checkbox" checked>Canales de calle</label>
   <label class="layer-row"><input id="toggle-buildings" type="checkbox" checked>Edificios 3D</label>
   <div class="layer-row layer-row--stack">
     <span>Paleta muros</span>
@@ -2558,19 +2891,6 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     <input id="building-roof-color" class="layer-color" type="color" value="#9b6b43">
   </div>
   <label class="layer-row"><input id="toggle-hydraulic-nodes" type="checkbox" checked>Nodos hidráulicos</label>
-  <label class="layer-row"><input id="toggle-hydraulic-links" type="checkbox" checked>Red combinada</label>
-  <div class="layer-row layer-row--stack">
-    <span>Color red combinada</span>
-    <input id="hydraulic-link-color" class="layer-color" type="color" value="#36e2b6">
-  </div>
-  <label class="layer-row layer-row--stack">
-    <span>Grosor red: <strong id="hydraulic-link-width-label">2.5 m</strong></span>
-    <input id="hydraulic-link-width" class="layer-range" type="range" min="1" max="5" step="0.25" value="2.5">
-  </label>
-  <label class="layer-row layer-row--stack">
-    <span>Enterrar red: <strong id="hydraulic-link-burial-label">0%</strong></span>
-    <input id="hydraulic-link-burial" class="layer-range" type="range" min="0" max="100" step="5" value="0">
-  </label>
   <label class="layer-row"><input id="toggle-rivers" type="checkbox">Ríos</label>
   <label class="layer-row"><input id="toggle-contours" type="checkbox">Curvas</label>
   <label class="layer-row"><input id="toggle-catastro" type="checkbox">Catastro</label>
@@ -2616,7 +2936,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <div class="leg-item"><span class="leg-swatch" style="background:#8fe9ff;height:3px"></span>Flechas de flujo</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#ff9f1c;width:12px;height:12px;border-radius:50%"></span>Tragantes / sumideros</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#ffffff;width:12px;height:12px;border-radius:50%;border:1px solid #2f7de1"></span>CRP / CRN nodos</div>
-  <div class="leg-item"><span id="hydraulic-link-legend-swatch" class="leg-swatch" style="background:#36e2b6;height:6px"></span>Red combinada inferida</div>
+
   <div class="leg-item"><span class="leg-swatch" style="background:#53b66b;height:10px;border-radius:3px;opacity:0.8"></span>Zonas verdes</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#FF8C00;width:12px;height:12px;border-radius:50%"></span>Puntos de desfogue</div>
   <div class="leg-item" style="color:#6a8ca0;font-size:10px;">🗺 Rutas GPS: solo en DEM</div>
@@ -2655,6 +2975,7 @@ const HYDRAULIC_NODES = {hydraulic_nodes_json};
 const HYDRAULIC_LINKS = {hydraulic_links_json};
 const GREEN_ZONES    = {green_json};
 const STREETS        = {streets_json};
+const STREET_CHANNELS = {street_channel_json};
 const BUILDINGS      = {buildings_json};
 const CURTAIN        = {curtain_json};
 const HYDROLOGY      = {hydrology_json};
@@ -2708,6 +3029,7 @@ const curtainLayer = new THREE.Group();
 const contourLayer = new THREE.Group();
 const riverLayer = new THREE.Group();
 const streetLayer = new THREE.Group();
+const streetChannelLayer = new THREE.Group();
 const buildingLayer = new THREE.Group();
 const hydraulicNodeLayer = new THREE.Group();
 const hydraulicLinkLayer = new THREE.Group();
@@ -2718,7 +3040,7 @@ const flowArrowLayer = new THREE.Group();
 
 for (const layer of [
   baseTerrainLayer, catastroLayer, gridLayer, curtainLayer, contourLayer,
-  riverLayer, streetLayer, buildingLayer, hydraulicNodeLayer, hydraulicLinkLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
+  riverLayer, streetLayer, streetChannelLayer, buildingLayer, hydraulicNodeLayer, hydraulicLinkLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
 ]) {{
   scene.add(layer);
 }}
@@ -2727,6 +3049,7 @@ const layerGroups = {{
   contours: contourLayer,
   rivers: riverLayer,
   streets: streetLayer,
+  streetChannels: streetChannelLayer,
   buildings: buildingLayer,
   hydraulicNodes: hydraulicNodeLayer,
   hydraulicLinks: hydraulicLinkLayer,
@@ -2741,7 +3064,7 @@ const layerGroups = {{
 
 const viewerState = {{
   baseMode: 'simple',
-  arrowDensity: 3,
+  arrowDensity: 4,
   flowColor: '#ffe080',
   flowRangeMin: 0.18,
   flowRangeMax: 0.82,
@@ -2755,7 +3078,8 @@ const viewerState = {{
   buildingRoofColor: '#9b6b43',
   contours: false,
   rivers: false,
-  streets: true,
+  streets: false,
+  streetChannels: true,
   buildings: true,
   hydraulicNodes: true,
   hydraulicLinks: true,
@@ -2776,7 +3100,7 @@ const presetStates = {{
     streets: true,
     buildings: true,
     hydraulicNodes: true,
-    hydraulicLinks: true,
+    hydraulicLinks: false,
     catastro: false,
     flowAccum: false,
     flowArrows: false,
@@ -2792,7 +3116,7 @@ const presetStates = {{
     streets: true,
     buildings: true,
     hydraulicNodes: true,
-    hydraulicLinks: true,
+    hydraulicLinks: false,
     catastro: false,
     flowAccum: false,
     flowArrows: false,
@@ -2808,7 +3132,7 @@ const presetStates = {{
     streets: true,
     buildings: true,
     hydraulicNodes: true,
-    hydraulicLinks: true,
+    hydraulicLinks: false,
     catastro: HAS_CATASTRO && CATASTRO_URI,
     flowAccum: true,
     flowArrows: true,
@@ -2862,9 +3186,9 @@ const hydraulicLinkLegendSwatch = document.getElementById('hydraulic-link-legend
 const arrowCountStat = document.getElementById('arrow-count-stat');
 const uiToggles = {{
   streets: document.getElementById('toggle-streets'),
+  streetChannels: document.getElementById('toggle-street-channels'),
   buildings: document.getElementById('toggle-buildings'),
   hydraulicNodes: document.getElementById('toggle-hydraulic-nodes'),
-  hydraulicLinks: document.getElementById('toggle-hydraulic-links'),
   rivers: document.getElementById('toggle-rivers'),
   contours: document.getElementById('toggle-contours'),
   catastro: document.getElementById('toggle-catastro'),
@@ -2877,11 +3201,11 @@ const uiToggles = {{
 }};
 
 const ARROW_DENSITY_CONFIG = {{
-  1: {{ label: 'Muy baja', stride: 18, minStrength: 0.36 }},
-  2: {{ label: 'Baja',     stride: 14, minStrength: 0.30 }},
-  3: {{ label: 'Media',    stride: 10, minStrength: 0.24 }},
-  4: {{ label: 'Alta',     stride: 8,  minStrength: 0.19 }},
-  5: {{ label: 'Muy alta', stride: 6,  minStrength: 0.15 }},
+  1: {{ label: 'Muy baja', stride: 12, minStrength: 0.28 }},
+  2: {{ label: 'Baja',     stride: 7,  minStrength: 0.20 }},
+  3: {{ label: 'Media',    stride: 4,  minStrength: 0.13 }},
+  4: {{ label: 'Alta',     stride: 2,  minStrength: 0.07 }},
+  5: {{ label: 'Muy alta', stride: 1,  minStrength: 0.03 }},
 }};
 
 const CELL_W = DEM.widthM / Math.max(1, DEM.nx - 1);
@@ -3663,7 +3987,7 @@ for (const seg of RIVERS) {{
 }}
 
 // ═══════════════════════════════════════════════════════════════
-//  CALLES / RED VIAL (OSM)
+//  CALLES / RED VIAL (OSM) — líneas de referencia
 // ═══════════════════════════════════════════════════════════════
 for (const street of STREETS) {{
   const pts = street.points.map(p => new THREE.Vector3(p[0], p[1], p[2]));
@@ -3676,6 +4000,85 @@ for (const street of STREETS) {{
   }});
   streetLayer.add(new THREE.Line(geo, mat));
 }}
+
+// ═══════════════════════════════════════════════════════════════
+//  CANALES DE CALLE — geometría U (paredes 90°, grosor exacto)
+// ═══════════════════════════════════════════════════════════════
+(function buildStreetChannels() {{
+  const HW = 6.5;    // semi-ancho del canal (metres escena) — ajustado a half_width DEM
+  const D  = 1.5;    // profundidad del canal (metros)
+  const EPS = 0.12;  // epsilon para evitar z-fighting con malla de terreno
+
+  const verts = [];
+  const idxs  = [];
+
+  // STREET_CHANNELS tiene coords XZ y la Y muestreada del DEM original (antes de excavar)
+  // => Y_original = H (nivel del terreno sin modificar)
+  // => top  = H + EPS   (ras del terreno exterior, cubre la malla bajo el canal)
+  // => piso = H - D + EPS (fondo del canal, visible donde el DEM SÍ quedó excavado)
+  for (const street of STREET_CHANNELS) {{
+    const pts = street.points;  // [[sx, H_original, sz], ...]
+    if (!pts || pts.length < 2) continue;
+
+    for (let k = 1; k < pts.length; k++) {{
+      const ax = pts[k-1][0], ay_orig = pts[k-1][1], az = pts[k-1][2];
+      const bx = pts[k][0],   by_orig = pts[k][1],   bz = pts[k][2];
+
+      const ay_top = ay_orig + EPS;        // tapa: nivel original del terreno
+      const by_top = by_orig + EPS;
+      const ay_bot = ay_orig - D + EPS;    // piso del canal
+      const by_bot = by_orig - D + EPS;
+
+      // Vector tangente en plano XZ
+      let tx = bx - ax, tz = bz - az;
+      const tl = Math.sqrt(tx*tx + tz*tz);
+      if (tl < 0.5) continue;
+      tx /= tl; tz /= tl;
+
+      // Perpendicular horizontal (+90° en XZ)
+      const px = -tz, pz = tx;
+
+      // 8 vértices del prisma: A-izq-top, A-izq-bot, A-der-bot, A-der-top
+      //                        B-izq-top, B-izq-bot, B-der-bot, B-der-top
+      const b = verts.length / 3;
+      verts.push(ax - HW*px, ay_top, az - HW*pz);   // 0
+      verts.push(ax - HW*px, ay_bot, az - HW*pz);   // 1
+      verts.push(ax + HW*px, ay_bot, az + HW*pz);   // 2
+      verts.push(ax + HW*px, ay_top, az + HW*pz);   // 3
+      verts.push(bx - HW*px, by_top, bz - HW*pz);   // 4
+      verts.push(bx - HW*px, by_bot, bz - HW*pz);   // 5
+      verts.push(bx + HW*px, by_bot, bz + HW*pz);   // 6
+      verts.push(bx + HW*px, by_top, bz + HW*pz);   // 7
+
+      // Pared izquierda: 0-1-5-4
+      idxs.push(b+0, b+1, b+5,  b+0, b+5, b+4);
+      // Piso: 1-2-6-5
+      idxs.push(b+1, b+2, b+6,  b+1, b+6, b+5);
+      // Pared derecha: 2-3-7-6
+      idxs.push(b+2, b+3, b+7,  b+2, b+7, b+6);
+      // Tapa superior (cara de asfalto): 0-3-7-4 — cubre la malla del terreno debajo
+      idxs.push(b+0, b+3, b+7,  b+0, b+7, b+4);
+    }}
+  }}
+
+  if (verts.length === 0) return;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(verts), 3));
+  geo.setIndex(idxs);
+  geo.computeVertexNormals();
+
+  const mat = new THREE.MeshLambertMaterial({{
+    color: 0x4a4030,
+    side: THREE.DoubleSide,  // normales de tapa varían por dirección del segmento
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -4,
+  }});
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = 1;   // rasterizar después del terreno
+  streetChannelLayer.add(mesh);
+}})();
 
 // ═══════════════════════════════════════════════════════════════
 //  EDIFICIOS 3D (OPEN BUILDINGS)
@@ -3872,7 +4275,20 @@ function animate() {{
   renderer.render(scene, camera);
 }}
 animate();
+
+/* === RED_HIDRAULICA_SEPARADA_DATA === */
+/* === RED_HIDRAULICA_SEPARADA_DATA === */
+
+/* === RED_HIDRAULICA_SEPARADA_LAYERS === */
+/* === RED_HIDRAULICA_SEPARADA_LAYERS === */
+
+/* === RED_HIDRAULICA_SEPARADA_EVENTS === */
+/* === RED_HIDRAULICA_SEPARADA_EVENTS === */
 </script>
+
+<!-- RED_HIDRAULICA_SEPARADA_PANEL -->
+<!-- /RED_HIDRAULICA_SEPARADA_PANEL -->
+
 </body>
 </html>
 """
@@ -3974,22 +4390,22 @@ def main():
             print(f"  Error catastro: {e}")
     catastro_b64 = base64.b64encode(catastro_bytes).decode() if catastro_bytes else ""
 
-    # ── 6. Preparar datos 3D ────────────────────────────────
-    print("\n[6] Preparando datos 3D ...")
-    dem_data    = prepare_dem_for_threejs(dem, lons, lats, lon_center, lat_center)
-    # Curvas → visibles en 3D | Rutas GPS → solo DEM
-    contours_3d = contours_to_threejs(contours_dict, lon_center, lat_center, dem, lons, lats)
-
-    # Convex hull / cortina
+    # ── 6. Leer capas vectoriales y modificar DEM ────────────────────────────
+    # Convex hull / cortina (no depende del DEM)
     hull_pts = compute_convex_hull(gps_routes)
     all_elevs = [pt[2] for r in gps_routes for pt in r]
     z_min = min(all_elevs);  z_max = max(all_elevs)
     curtain = hull_to_curtain_threejs(hull_pts, lon_center, lat_center, z_min, z_max)
 
-    # Ríos (Cauce.shp)
-    print("\n[6b] Leyendo ríos (Cauce.shp) ...")
+    # Guardar DEM base (sólo IDW + puntos hidráulicos, antes de cualquier carving)
+    # Se usa para construir el dem_flow_hi en alta resolución sin doble-aplicación
+    import numpy as _np_base
+    dem_base = _np_base.array(dem)
+
+    # Ríos (Cauce.shp) + tallar cañón en el DEM
+    print("\n[6b] Leyendo ríos (Cauce.shp) y tallando cañón en DEM ...")
     raw_rivers = read_cauce_rivers(CAUCE_SHP, lon_min, lat_min, lon_max, lat_max)
-    rivers_3d  = rivers_to_threejs(raw_rivers, lon_center, lat_center, dem, lons, lats)
+    dem = carve_river_canyon(dem, lons, lats, raw_rivers, depth_m=2.5, half_width_m=4.0)
 
     # Puntos de desfogue
     print("\n[6c] Leyendo puntos de desfogue ...")
@@ -4012,9 +4428,59 @@ def main():
     print("\n[6e] Leyendo calles / red vial (OSM) ...")
     raw_streets = download_osm_streets(lon_min, lat_min, lon_max, lat_max)
     streets_3d = streets_to_threejs(raw_streets, lon_center, lat_center, dem, lons, lats)
+    # Datos de canal con elevación exacta del DEM (sin offset, para geometría U)
+    street_channel_data = prepare_street_channel_data(raw_streets, lon_center, lat_center, dem, lons, lats)
 
     print("\n[6f] Armando red hidraulica preliminar ...")
     hydraulic_links = build_hydraulic_network(hydraulic_structures, raw_drain_pts, raw_streets)
+
+    # Open Buildings
+    print("\n[6g] Leyendo Open Buildings ...")
+    raw_buildings = read_open_buildings_geojson(OPEN_BUILDINGS_GEOJSON, lon_min, lat_min, lon_max, lat_max)
+    buildings_3d = buildings_to_threejs(raw_buildings, lon_center, lat_center)
+
+    # Edificios sobre el DEM visual (directo, sin suavizado)
+    print("\n[6g2] Aplicando edificios al DEM visual ...")
+    dem = raise_building_obstacles(dem, lons, lats, raw_buildings, wall_height_m=2.0)
+    print(f"  DEM visual (sin calles): zMin={dem.min():.1f}m  zMax={dem.max():.1f}m")
+
+    # Preparar malla 3D desde DEM limpio (sin calles)
+    print("\n[6g3] Preparando malla 3D ...")
+    dem_data    = prepare_dem_for_threejs(dem, lons, lats, lon_center, lat_center)
+    contours_3d = contours_to_threejs(contours_dict, lon_center, lat_center, dem, lons, lats)
+    rivers_3d   = rivers_to_threejs(raw_rivers, lon_center, lat_center, dem, lons, lats)
+
+    # Cortes de calle POST-DEM sobre el array de alturas (perfil recto, paredes verticales)
+    print("\n[6g4] Aplicando cortes de calle post-DEM (perfil rectangular) ...")
+    dem_data = apply_street_channels_post_dem(
+        dem_data, lons, lats, raw_streets, depth_m=1.5, half_width_m=7.0
+    )
+
+    # Hidrología en alta resolución
+    # Parte del DEM BASE (sin ríos ni edificios), aplica los tres capas a 660×660
+    # con cada uno su perfil propio:
+    #   ríos     → Gaussiano (carve_river_canyon)   profundidad gradual
+    #   edificios → elevación plana (raise_building_obstacles)
+    #   calles   → corte rectangular (carve_street_channels)
+    import numpy as np
+    ny_vis, nx_vis = dem.shape
+    ny_hi = ny_vis * FLOW_RESOLUTION_SCALE
+    nx_hi = nx_vis * FLOW_RESOLUTION_SCALE
+    lons_hi = np.linspace(lons[0], lons[-1], nx_hi)
+    lats_hi = np.linspace(lats[0], lats[-1], ny_hi)
+
+    print(f"\n[6h] Construyendo DEM de flujo ({ny_hi}×{nx_hi}, escala ×{FLOW_RESOLUTION_SCALE}) ...")
+    dem_flow_hi = upsample_dem_numpy(dem_base, FLOW_RESOLUTION_SCALE)
+    print("  [6h-a] Tallando cauces Gaussianos a alta resolución ...")
+    dem_flow_hi = carve_river_canyon(dem_flow_hi, lons_hi, lats_hi, raw_rivers,
+                                      depth_m=2.5, half_width_m=4.0)
+    print("  [6h-b] Elevando obstáculos de edificios a alta resolución ...")
+    dem_flow_hi = raise_building_obstacles(dem_flow_hi, lons_hi, lats_hi, raw_buildings,
+                                            wall_height_m=2.0)
+    print("  [6h-c] Tallando canales de calle rectangulares a alta resolución ...")
+    dem_flow_hi = carve_street_channels(dem_flow_hi, lons_hi, lats_hi, raw_streets,
+                                         depth_m=1.5, half_width_m=4.0)
+
     surface_sinks = [
         {"id": item["id"], "lon": item["lon"], "lat": item["lat"]}
         for item in hydraulic_structures if item["kind"] == "tragante"
@@ -4022,14 +4488,13 @@ def main():
         {"id": item["id"], "lon": item["lon"], "lat": item["lat"]}
         for item in raw_drain_pts
     ]
-    hydrology_data = build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=surface_sinks)
+    print(f"\n[6h2] Calculando hidrología fina ({ny_hi}×{nx_hi}) ...")
+    hydrology_hires = build_flow_hydrology(dem_flow_hi, lons_hi, lats_hi, lat_center,
+                                            surface_sinks=surface_sinks)
+    print(f"  Reduciendo a {ny_vis}×{nx_vis} para visualización ...")
+    hydrology_data = downsample_hydrology_data(hydrology_hires, ny_vis, nx_vis, FLOW_RESOLUTION_SCALE)
     hydraulic_nodes_3d = hydraulic_nodes_to_threejs(hydraulic_structures, lon_center, lat_center, dem, lons, lats, hydrology_data)
     hydraulic_links_3d = hydraulic_links_to_threejs(hydraulic_links, lon_center, lat_center, dem, lons, lats)
-
-    # Open Buildings / huellas de edificios
-    print("\n[6g] Leyendo Open Buildings ...")
-    raw_buildings = read_open_buildings_geojson(OPEN_BUILDINGS_GEOJSON, lon_min, lat_min, lon_max, lat_max)
-    buildings_3d = buildings_to_threejs(raw_buildings, lon_center, lat_center)
 
     # ── 7. Descargar vendors Three.js ───────────────────────
     print("\n[7] Preparando librerías Three.js ...")
@@ -4038,7 +4503,9 @@ def main():
     # ── 8. Generar HTML ─────────────────────────────────────
     print("\n[8] Generando HTML ...")
     html_content = make_html(
-        dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, buildings_3d,
+        dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d,
+        hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d,
+        streets_3d, street_channel_data, buildings_3d,
         tex_b64, catastro_b64, vendor_js, lon_center, lat_center
     )
 
@@ -4051,6 +4518,24 @@ def main():
     print(f"  Tamaño: {html_size / 1_048_576:.1f} MB")
     print(f"{'='*60}")
     print(f"\n  Abre este archivo en cualquier navegador moderno.")
+
+    # Inyectar redes hidráulicas si existen los shapefiles
+    redes_script = Path(__file__).parent / "exportar_redes_a_js.py"
+    shp_v6 = Path(__file__).parent / "output/shapefiles_v6/red_pluvial_links.shp"
+    if redes_script.exists() and shp_v6.exists():
+        print("\n[9] Inyectando redes hidráulicas (pluvial + residual) ...")
+        import subprocess, sys
+        result = subprocess.run([sys.executable, str(redes_script)],
+                                capture_output=True, text=True)
+        if result.returncode == 0:
+            print("  ✅ Redes hidráulicas inyectadas correctamente.")
+        else:
+            print(f"  ⚠ exportar_redes_a_js.py retornó error:\n{result.stderr[:500]}")
+    else:
+        if not redes_script.exists():
+            print("\n[9] exportar_redes_a_js.py no encontrado — redes hidráulicas omitidas.")
+        else:
+            print("\n[9] Shapefiles v6 no encontrados — corre exportar_redes_hidraulicas.py primero.")
 
 
 if __name__ == "__main__":
