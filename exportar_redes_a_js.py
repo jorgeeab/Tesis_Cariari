@@ -27,7 +27,7 @@ MPD_LAT    = 110540.0
 Z_EXAG     = 1.0
 
 # Elevacion de terreno base para puntos sin elevacion de fondo
-TERRAIN_BASE = 945.0
+TERRAIN_BASE = 936.0
 
 
 def crtm_to_scene(x_crtm, y_crtm, elev=None):
@@ -96,8 +96,8 @@ def build_link_js(shp_path):
         dst_prof = to_f(row.get("dst_prof")) or 1.4
 
         # Superficie = fondo + profundidad; si no hay fondo usar TERRAIN_BASE
-        src_sup = (src_fon + src_prof + 1.0) if src_fon is not None else TERRAIN_BASE + 1.0
-        dst_sup = (dst_fon + dst_prof + 1.0) if dst_fon is not None else TERRAIN_BASE + 1.0
+        src_sup = (src_fon + src_prof) if src_fon is not None else TERRAIN_BASE
+        dst_sup = (dst_fon + dst_prof) if dst_fon is not None else TERRAIN_BASE
 
         coords = list(geom.coords)
         n_pts  = len(coords)
@@ -106,15 +106,22 @@ def build_link_js(shp_path):
         pts_wgs = pts_gdf.to_crs(epsg=4326)
 
         pts_3d = []
+        buried_pts_3d = []
         for j, pt_wgs in enumerate(pts_wgs.geometry):
             lon  = float(pt_wgs.x)
             lat  = float(pt_wgs.y)
             frac = j / max(1, n_pts - 1)
-            # Interpolar superficie a lo largo del tramo
-            sy = (src_sup + frac * (dst_sup - src_sup)) * Z_EXAG
+            # Interpolar superficie y fondo a lo largo del tramo
+            sup_val = src_sup + frac * (dst_sup - src_sup)
+            fon_val = (src_fon + frac * (dst_fon - src_fon)) if src_fon is not None and dst_fon is not None else (sup_val - (src_prof + frac * (dst_prof - src_prof)))
+            
+            sy = (sup_val + 0.55) * Z_EXAG
+            sy_buried = fon_val * Z_EXAG
+            
             sx = (lon - LON_CENTER) * MPD_LON
             sz = -(lat - LAT_CENTER) * MPD_LAT
             pts_3d.append([round(sx, 2), round(sy, 2), round(sz, 2)])
+            buried_pts_3d.append([round(sx, 2), round(sy_buried, 2), round(sz, 2)])
 
         drop = row.get("drop_m")
         dist = row.get("dist_m")
@@ -125,6 +132,7 @@ def build_link_js(shp_path):
             "drop_m":   round(float(drop), 2) if to_f(drop) is not None else None,
             "dist_m":   round(float(dist), 1) if to_f(dist) is not None else None,
             "points":   pts_3d,
+            "buried_points": buried_pts_3d,
         })
     return links
 
@@ -233,9 +241,14 @@ function buildRedPluvialLinks() {
   if (!RED_PLUVIAL_LINKS || !RED_PLUVIAL_LINKS.length) return;
   const radius = 1.2;
   const col = new THREE.Color(0x29b6f6);
+  const burial = typeof viewerState !== 'undefined' ? clamp(viewerState.hydraulicLinkBurial, 0, 1) : 0.0;
   for (const link of RED_PLUVIAL_LINKS) {
     if (!link.points || link.points.length < 2) continue;
-    const pts = link.points.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+    const buried = link.buried_points || link.points;
+    const pts = link.points.map((p, idx) => {
+      const b = buried[idx] || p;
+      return new THREE.Vector3(p[0], lerp(p[1], b[1], burial), p[2]);
+    });
     const curve = new THREE.CurvePath();
     for (let i = 1; i < pts.length; i++) curve.add(new THREE.LineCurve3(pts[i-1], pts[i]));
     const geo = new THREE.TubeGeometry(curve, Math.max(pts.length*6, 16), radius, 6, false);
@@ -254,9 +267,14 @@ function buildRedResidualLinks() {
   if (!RED_RESIDUAL_LINKS || !RED_RESIDUAL_LINKS.length) return;
   const radius = 1.2;
   const col = new THREE.Color(0xff7043);
+  const burial = typeof viewerState !== 'undefined' ? clamp(viewerState.hydraulicLinkBurial, 0, 1) : 0.0;
   for (const link of RED_RESIDUAL_LINKS) {
     if (!link.points || link.points.length < 2) continue;
-    const pts = link.points.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+    const buried = link.buried_points || link.points;
+    const pts = link.points.map((p, idx) => {
+      const b = buried[idx] || p;
+      return new THREE.Vector3(p[0], lerp(p[1], b[1], burial), p[2]);
+    });
     const curve = new THREE.CurvePath();
     for (let i = 1; i < pts.length; i++) curve.add(new THREE.LineCurve3(pts[i-1], pts[i]));
     const geo = new THREE.TubeGeometry(curve, Math.max(pts.length*6, 16), radius, 6, false);
@@ -283,6 +301,12 @@ document.getElementById('toggle-red-pluvial-links')?.addEventListener('change', 
 });
 document.getElementById('toggle-red-residual-links')?.addEventListener('change', e => {
   residualLinkLayer.visible = e.target.checked;
+});
+
+// Reactivar reconstrucción al mover el control de entierro (burial slider)
+document.getElementById('hydraulic-link-burial')?.addEventListener('input', () => {
+  buildRedPluvialLinks();
+  buildRedResidualLinks();
 });
 """
 

@@ -35,7 +35,7 @@ ALCANTARILLADO_SHP = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantari
 LINEAS_SHP         = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/liteas a seguir.shp"
 TRAGANTES_SHP      = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Tragantes.shp"
 CRP_SHP            = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRP.shp"
-CRN_SHP            = Path(r"C:\Users\Jorge\Documents\CRN.shp")
+CRN_SHP            = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRN_CAPA.shp"
 DESFOGUES_SHP      = BASE / "Arcgis shapes y curvas/Desfogues.shp"
 OUT_DIR            = BASE / "output/shapefiles"
 OUT_DIR_V2         = BASE / "output/shapefiles_v6"   # v6: tipo de linea por extremos
@@ -772,6 +772,34 @@ def main():
     lateral_links = process_tragante_laterals(nodes_trag, all_sections)
 
     all_links = all_sections + lateral_links
+
+    # Propagar cotas de fondo y superficie estimadas (flujo por gravedad al 1% de pendiente)
+    print("\n[5b] Propagando cotas estimadas por gravedad (1% pendiente) a nodos sin cota (desfogues, etc.) ...")
+    for lk in all_links:
+        src_elev = lk["src_elev"]
+        dst_elev = lk["dst_elev"]
+        dist = lk["dist_m"]
+        
+        if src_elev is not None and dst_elev is None:
+            lk["dst_elev"] = round(src_elev - (dist * 0.01), 3)
+        elif dst_elev is not None and src_elev is None:
+            lk["src_elev"] = round(dst_elev + (dist * 0.01), 3)
+        elif src_elev is None and dst_elev is None:
+            lk["src_elev"] = 936.0
+            lk["dst_elev"] = round(936.0 - (dist * 0.01), 3)
+
+    # Actualizar cotas en el índice de nodos
+    for lk in all_links:
+        src_id = lk["src_id"]
+        dst_id = lk["dst_id"]
+        if src_id in node_by_id and node_by_id[src_id]["fon_elev"] is None:
+            node_by_id[src_id]["fon_elev"] = lk["src_elev"]
+            node_by_id[src_id]["sup_elev"] = round(lk["src_elev"] + node_by_id[src_id]["prof_m"], 3)
+            node_by_id[src_id]["hydraulic_elev"] = lk["src_elev"]
+        if dst_id in node_by_id and node_by_id[dst_id]["fon_elev"] is None:
+            node_by_id[dst_id]["fon_elev"] = lk["dst_elev"]
+            node_by_id[dst_id]["sup_elev"] = round(lk["dst_elev"] + node_by_id[dst_id]["prof_m"], 3)
+            node_by_id[dst_id]["hydraulic_elev"] = lk["dst_elev"]
 
     pluvial_links  = [lk for lk in all_links if lk["red"] == "pluvial"]
     residual_links = [lk for lk in all_links if lk["red"] == "residual"]

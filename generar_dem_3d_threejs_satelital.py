@@ -28,6 +28,7 @@ import time
 import io
 import re
 import hashlib
+import html as html_utils
 import xml.etree.ElementTree as ET
 from pathlib import Path
 import traceback
@@ -63,6 +64,15 @@ STRUCTURE_SURFACE_TOL = 4.0     # diferencia maxima admisible contra el DEM prel
 STRUCTURE_MIN_ELEV  = 900.0
 STRUCTURE_MAX_ELEV  = 1100.0
 STRUCTURE_MAX_DEPTH = 12.0
+DEFAULT_RUNOFF_PCT = {
+    "base": 78.0,        # suelo abierto / no clasificado
+    "vegetation": 10.0,  # vegetacion detectada
+    "building": 98.0,    # cubiertas y huellas de edificios
+    "street": 94.0,      # calles
+}
+DEFAULT_INFILTRATION_PCT = {
+    key: 100.0 - value for key, value in DEFAULT_RUNOFF_PCT.items()
+}
 DEFAULT_STRUCTURE_DEPTH_M = {
     "tragante": 0.80,
     "crp": 1.60,
@@ -804,10 +814,11 @@ def apply_street_profile_dem(dem, lons, lats, streets,
     return dem, street_mask
 
 
-def build_street_polygons(streets, lat_center):
+def build_street_polygons(streets, lat_center, width_scale=1.0):
     """
     Construye un MultiPolygon unificado del área de calles en WGS84.
     Cada segmento OSM se bufferiza por su ancho estimado según tipo de vía.
+    width_scale : multiplicador global del ancho de todas las calles (1.0 = real).
     Retorna: shapely geometry (MultiPolygon/Polygon) o None si no hay calles.
     """
     from shapely.geometry import LineString
@@ -832,7 +843,7 @@ def build_street_polygons(streets, lat_center):
         if len(coords) < 2:
             continue
         hw = street.get("highway", "residential")
-        half_w_m = HALF_WIDTH_M.get(hw, DEFAULT_HW)
+        half_w_m = HALF_WIDTH_M.get(hw, DEFAULT_HW) * width_scale
         half_w_deg = half_w_m / avg_mpd
         try:
             ls = LineString(coords)
@@ -954,15 +965,14 @@ def apply_street_profile_from_poly(dem, lons, lats, street_poly,
         dt_in_m  = _np.where(inside, ramp_m, 0.0)
         gaussian_filter = None
 
-    # Perfil continuo de doble rampa — elimina aliasing en el límite del polígono:
-    #   exterior: depth_m → 0   en ramp_m metros desde el borde
-    #   interior: 0 → depth_m  en ramp_m*0.4 metros desde el borde
-    #   (el fondo plano se alcanza rápido adentro; transición suave en el límite)
-    inner_half = ramp_m * 0.4
+    # Perfil de canal de FONDO PLANO:
+    #   interior (dentro del polígono): profundidad constante = depth_m
+    #     → la calle mantiene la MISMA altura en todo su ancho
+    #   exterior (dentro de ramp_m del borde): rampa lineal depth_m → 0
+    #     → pared lateral suave del canal
     outer_ramp = _np.where(dt_out_m < ramp_m,
                            depth_m * (1.0 - dt_out_m / ramp_m), 0.0)
-    inner_ramp = _np.minimum(depth_m, depth_m * dt_in_m / max(inner_half, cell_m))
-    ramp_off   = _np.where(inside, inner_ramp, outer_ramp)
+    ramp_off   = _np.where(inside, depth_m, outer_ramp)
 
     # Suavizado Gaussiano para eliminar el efecto de escalera de la rasterización binaria
     sigma_px = 0.0
@@ -976,6 +986,456 @@ def apply_street_profile_from_poly(dem, lons, lats, street_poly,
     print(f"  Perfil calle (poly): {n_cut} celdas  "
           f"prof={depth_m}m  rampa={ramp_m}m  σ={sigma_px:.1f}px  cel≈{cell_m:.1f}m")
     return dem - ramp_off, street_mask
+
+
+STREET_HALF_WIDTH_M = {
+    "motorway": 7.0, "trunk": 6.0, "primary": 5.5,
+    "secondary": 4.5, "tertiary": 4.0,
+    "residential": 3.5, "living_street": 3.0,
+    "service": 2.5, "unclassified": 3.5,
+    "footway": 1.5, "path": 1.2, "cycleway": 1.5, "steps": 1.0,
+}
+
+
+def compute_street_dist_crop(lons_crop, lats_crop, streets):
+    """
+    Para cada celda del crop devuelve:
+      dist_map : distancia (m) al eje de calle más cercano
+      half_map : semiancho base (m, según tipo de vía) de esa calle más cercana
+    Esto permite que el preview reconstruya el canal a CUALQUIER ancho/profundidad
+    de forma dinámica en JS (el ancho ya no queda fijado en Python).
+    """
+    import numpy as _np
+    ny, nx = len(lats_crop), len(lons_crop)
+    lat_mid = (lats_crop[0] + lats_crop[-1]) / 2.0
+    m_lon = 111320.0 * math.cos(math.radians(lat_mid))
+    m_lat = 110540.0
+
+    LON, LAT = _np.meshgrid(_np.array(lons_crop), _np.array(lats_crop))
+    dist_map = _np.full((ny, nx), 1e6)
+    half_map = _np.full((ny, nx), 3.5)
+
+    for street in streets:
+        coords = street.get("coords", [])
+        if len(coords) < 2:
+            continue
+        hw = STREET_HALF_WIDTH_M.get(street.get("highway", "residential"), 3.5)
+        for k in range(len(coords) - 1):
+            lon0, lat0 = coords[k]
+            lon1, lat1 = coords[k + 1]
+            dx = (LON - lon0) * m_lon
+            dy = (LAT - lat0) * m_lat
+            sx = (lon1 - lon0) * m_lon
+            sy = (lat1 - lat0) * m_lat
+            seg_len2 = sx*sx + sy*sy
+            if seg_len2 < 1e-10:
+                d = _np.sqrt(dx*dx + dy*dy)
+            else:
+                t = _np.clip((dx*sx + dy*sy) / seg_len2, 0.0, 1.0)
+                d = _np.sqrt((dx - t*sx)**2 + (dy - t*sy)**2)
+            closer = d < dist_map
+            dist_map = _np.where(closer, d, dist_map)
+            half_map = _np.where(closer, hw, half_map)
+
+    cell_m = ((lons_crop[-1]-lons_crop[0])/(nx-1)*m_lon +
+              (lats_crop[-1]-lats_crop[0])/(ny-1)*m_lat) / 2.0
+    return dist_map, half_map, cell_m
+
+
+def compute_river_dist_crop(lons_crop, lats_crop, rivers):
+    """Min distance (m) from each crop cell to the nearest river segment."""
+    import numpy as _np
+    ny, nx = len(lats_crop), len(lons_crop)
+    lat_mid = (lats_crop[0] + lats_crop[-1]) / 2.0
+    m_lon = 111320.0 * math.cos(math.radians(lat_mid))
+    m_lat = 110540.0
+
+    lons_g = _np.array(lons_crop)
+    lats_g = _np.array(lats_crop)
+    LON, LAT = _np.meshgrid(lons_g, lats_g)  # (ny, nx)
+
+    dist_map = _np.full((ny, nx), 1e6)
+    for seg in rivers:
+        for k in range(len(seg) - 1):
+            lon0, lat0 = seg[k]
+            lon1, lat1 = seg[k + 1]
+            dx = (LON - lon0) * m_lon
+            dy = (LAT - lat0) * m_lat
+            sx = (lon1 - lon0) * m_lon
+            sy = (lat1 - lat0) * m_lat
+            seg_len2 = sx*sx + sy*sy
+            if seg_len2 < 1e-10:
+                d = _np.sqrt(dx*dx + dy*dy)
+            else:
+                t = _np.clip((dx*sx + dy*sy) / seg_len2, 0.0, 1.0)
+                d = _np.sqrt((dx - t*sx)**2 + (dy - t*sy)**2)
+            dist_map = _np.minimum(dist_map, d)
+    return dist_map
+
+
+def _crop_satellite_b64(tex_bytes, lons_vis, lats_vis, lons_crop, lats_crop):
+    """Recorta la textura satelital completa al área del crop y la devuelve en base64.
+    Orienta el recorte para que fila 0 = lats_crop[0] y col 0 = lons_crop[0]."""
+    if not tex_bytes or not HAS_PIL:
+        return ""
+    try:
+        import io as _io, base64 as _b64
+        img = Image.open(_io.BytesIO(tex_bytes)).convert("RGB")
+        Wpx, Hpx = img.size
+        lon_min, lon_max = min(lons_vis), max(lons_vis)
+        lat_min, lat_max = min(lats_vis), max(lats_vis)
+        def lon_px(lon): return (lon - lon_min) / (lon_max - lon_min) * Wpx
+        def lat_py(lat): return (lat_max - lat) / (lat_max - lat_min) * Hpx  # top=lat_max
+        lon_lo, lon_hi = min(lons_crop), max(lons_crop)
+        lat_lo, lat_hi = min(lats_crop), max(lats_crop)
+        px0 = max(0, int(lon_px(lon_lo)));  px1 = min(Wpx, int(lon_px(lon_hi)) + 1)
+        py0 = max(0, int(lat_py(lat_hi)));  py1 = min(Hpx, int(lat_py(lat_lo)) + 1)
+        crop = img.crop((px0, py0, px1, py1))
+        # Orientar: queremos fila 0 = lats_crop[0]
+        if lats_crop[0] < lats_crop[-1]:   # ascendente → fila 0 debe ser lat_lo (abajo) → voltear
+            crop = crop.transpose(Image.FLIP_TOP_BOTTOM)
+        if lons_crop[0] > lons_crop[-1]:   # descendente en lon → voltear horizontal
+            crop = crop.transpose(Image.FLIP_LEFT_RIGHT)
+        buf = _io.BytesIO()
+        crop.save(buf, format="PNG")
+        return _b64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        print(f"  AVISO recorte satelital preview: {e!r}")
+        return ""
+
+
+def _buildings_in_crop(raw_buildings, lons_crop, lats_crop):
+    """Devuelve edificios dentro del crop como polígonos en metros relativos al
+    centro del crop: [{ "pts": [[x,z],...], "h": altura_m }]."""
+    if not raw_buildings:
+        return []
+    lon_c = (lons_crop[0] + lons_crop[-1]) / 2.0
+    lat_c = (lats_crop[0] + lats_crop[-1]) / 2.0
+    mpd_lon = 111320.0 * math.cos(math.radians(lat_c))
+    mpd_lat = 110540.0
+    lon_lo, lon_hi = min(lons_crop), max(lons_crop)
+    lat_lo, lat_hi = min(lats_crop), max(lats_crop)
+    out = []
+    for bld in raw_buildings:
+        outer = bld.get("outer", [])
+        if len(outer) < 3:
+            continue
+        # Filtrar: al menos un vértice dentro del crop
+        if not any(lon_lo <= lo <= lon_hi and lat_lo <= la <= lat_hi for lo, la in outer):
+            continue
+        pts = [[round((lo - lon_c) * mpd_lon, 2), round((la - lat_c) * mpd_lat, 2)]
+               for lo, la in outer]
+        h = bld.get("height_m") or 0
+        try:
+            h = float(h)
+        except Exception:
+            h = 0.0
+        if h <= 0:
+            h = 3.0   # altura por defecto
+        out.append({"pts": pts, "h": round(h, 1)})
+    return out
+
+
+def save_preview_patch(dem_base_vis, lons_vis, lats_vis,
+                       raw_streets, raw_rivers, raw_buildings, tex_bytes,
+                       out_path, settings=None, crop_size=120):
+    """
+    Extrae un recorte central del DEM base (SIN tallar ríos ni calles) y guarda
+    preview_patch.json. El preview aplica río + calle dinámicamente en JS usando
+    las distancias precomputadas, e incluye textura satelital recortada y edificios.
+    """
+    import numpy as _np, json as _json
+    ny, nx = dem_base_vis.shape
+    r0 = max(0, (ny - crop_size) // 2)
+    c0 = max(0, (nx - crop_size) // 2)
+    r1 = min(ny, r0 + crop_size)
+    c1 = min(nx, c0 + crop_size)
+    crop_ny, crop_nx = r1 - r0, c1 - c0
+
+    lons_crop = list(lons_vis[c0:c1])
+    lats_crop = list(lats_vis[r0:r1])
+    dem_crop  = dem_base_vis[r0:r1, c0:c1]
+
+    street_dist, street_half, cell_m = compute_street_dist_crop(lons_crop, lats_crop, raw_streets)
+    river_dist = compute_river_dist_crop(lons_crop, lats_crop, raw_rivers)
+    sat_b64    = _crop_satellite_b64(tex_bytes, lons_vis, lats_vis, lons_crop, lats_crop)
+    buildings  = _buildings_in_crop(raw_buildings, lons_crop, lats_crop)
+    print(f"  Preview: {len(buildings)} edificios, satelital={'sí' if sat_b64 else 'no'}")
+
+    patch = {
+        "nx": crop_nx,
+        "ny": crop_ny,
+        "cell_m": round(cell_m, 3),
+        "widthM":  round((lons_crop[-1]-lons_crop[0]) * 111320.0 * math.cos(math.radians(lats_crop[len(lats_crop)//2])), 1),
+        "heightM": round((lats_crop[-1]-lats_crop[0]) * 110540.0, 1),
+        "zMin": round(float(dem_crop.min()), 2),
+        "zMax": round(float(dem_crop.max()), 2),
+        "dem":         [round(float(v), 2) for v in dem_crop.flatten()],
+        "street_dist": [round(float(v), 2) for v in street_dist.flatten()],
+        "street_half": [round(float(v), 2) for v in street_half.flatten()],
+        "river_dist":  [round(float(v), 2) for v in river_dist.flatten()],
+        "buildings":   buildings,
+        "sat_b64":     sat_b64,
+        "settings":    settings or {},
+    }
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        _json.dump(patch, f, separators=(',', ':'))
+    print(f"  Preview patch guardado: {out_path} ({crop_nx}×{crop_ny} celdas)")
+
+
+def _pil_resample_filter():
+    if not HAS_PIL:
+        return None
+    return getattr(getattr(Image, "Resampling", Image), "BILINEAR")
+
+
+def _resize_unit_array(arr, target_nx, target_ny):
+    arr = np.clip(np.asarray(arr, dtype=np.float32), 0.0, 1.0)
+    img = Image.fromarray(np.uint8(arr * 255), mode="L")
+    img = img.resize((target_nx, target_ny), _pil_resample_filter())
+    return np.asarray(img, dtype=np.float32) / 255.0
+
+
+def _clamp_pct(value, default):
+    try:
+        value = float(value)
+    except Exception:
+        value = default
+    return max(0.0, min(100.0, value))
+
+
+def normalize_runoff_pct(runoff_pct=None):
+    cfg = dict(DEFAULT_RUNOFF_PCT)
+    if runoff_pct:
+        for key in cfg:
+            if key in runoff_pct and runoff_pct[key] is not None:
+                cfg[key] = _clamp_pct(runoff_pct[key], cfg[key])
+    frac = {key: value / 100.0 for key, value in cfg.items()}
+    return cfg, frac
+
+
+def detect_vegetation_ai_mask(tex_bytes, target_nx, target_ny):
+    """
+    Segmenta vegetación con un modelo semántico preentrenado, si las dependencias
+    están disponibles. El modelo se descarga/cacha por Hugging Face en el primer uso.
+    Retorna (mask_north_top, method) o (None, reason).
+    """
+    if not HAS_PIL or not tex_bytes:
+        return None, "sin textura satelital"
+    if os.getenv("VEGETATION_AI", "1").strip().lower() in {"0", "false", "no"}:
+        return None, "IA desactivada por VEGETATION_AI=0"
+
+    model_name = os.getenv("VEGETATION_AI_MODEL", "nvidia/segformer-b0-finetuned-ade-512-512")
+    try:
+        from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
+        import torch
+    except Exception as exc:
+        return None, f"IA no disponible ({type(exc).__name__})"
+
+    try:
+        img = Image.open(io.BytesIO(tex_bytes)).convert("RGB")
+        img_model = img.copy()
+        img_model.thumbnail((1024, 1024), _pil_resample_filter())
+
+        extractor = SegformerFeatureExtractor.from_pretrained(model_name)
+        model = SegformerForSemanticSegmentation.from_pretrained(model_name)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(device).eval()
+
+        inputs = extractor(images=img_model, return_tensors="pt")
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        with torch.no_grad():
+            logits = model(**inputs).logits
+            logits = torch.nn.functional.interpolate(
+                logits,
+                size=img_model.size[::-1],
+                mode="bilinear",
+                align_corners=False,
+            )
+            pred = logits.argmax(dim=1)[0].detach().cpu()
+
+        pred_np = np.array(pred.tolist(), dtype=np.int16)
+        labels = {int(k): str(v).lower() for k, v in model.config.id2label.items()}
+        vegetation_ids = [
+            idx for idx, label in labels.items()
+            if any(token in label for token in ("tree", "grass", "plant", "palm", "field"))
+        ]
+        if not vegetation_ids:
+            return None, "modelo sin clases vegetales reconocibles"
+
+        mask = np.isin(pred_np, vegetation_ids).astype(np.float32)
+        mask = _resize_unit_array(mask, target_nx, target_ny)
+        return mask, f"IA SegFormer ADE20K ({model_name})"
+    except Exception as exc:
+        return None, f"falló IA ({type(exc).__name__}: {exc})"
+
+
+def detect_vegetation_rgb_mask(tex_bytes, target_nx, target_ny):
+    """
+    Fallback determinístico desde RGB: prioriza tonos verdes y alta saturación.
+    No reemplaza al modelo IA, pero mantiene la capa operativa sin dependencias.
+    """
+    if not HAS_PIL or not tex_bytes:
+        return np.zeros((target_ny, target_nx), dtype=np.float32)
+    img = Image.open(io.BytesIO(tex_bytes)).convert("RGB")
+    img = img.resize((target_nx, target_ny), _pil_resample_filter())
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
+    mx = np.maximum.reduce([r, g, b])
+    mn = np.minimum.reduce([r, g, b])
+    sat = mx - mn
+    exg = 2.0 * g - r - b
+    vari = (g - r) / np.maximum(g + r - b, 1e-4)
+
+    green_score = (
+        0.45 * np.clip((g - np.maximum(r, b) + 0.05) / 0.22, 0.0, 1.0)
+        + 0.30 * np.clip((exg + 0.08) / 0.35, 0.0, 1.0)
+        + 0.25 * np.clip((vari + 0.05) / 0.35, 0.0, 1.0)
+    )
+    shade_guard = np.clip((mx - 0.18) / 0.22, 0.0, 1.0)
+    sat_guard = np.clip(sat / 0.18, 0.0, 1.0)
+    mask = green_score * np.maximum(0.35, shade_guard) * np.maximum(0.45, sat_guard)
+    return np.clip(mask, 0.0, 1.0).astype(np.float32)
+
+
+def build_vegetation_mask(tex_bytes, target_nx, target_ny):
+    mask, method = detect_vegetation_ai_mask(tex_bytes, target_nx, target_ny)
+    if mask is None:
+        print(f"  Vegetación IA: {method}; usando detector RGB")
+        mask = detect_vegetation_rgb_mask(tex_bytes, target_nx, target_ny)
+        method = f"RGB fallback ({method})"
+    else:
+        print(f"  Vegetación IA: {method}")
+    # La textura está norte-arriba; el DEM/lats de cálculo está sur-arriba.
+    return np.flipud(mask), method
+
+
+def rasterize_building_mask(lons, lats, buildings):
+    mask = np.zeros((len(lats), len(lons)), dtype=np.float32)
+    if not buildings or not HAS_GEO:
+        return mask
+    try:
+        from shapely.geometry import Point as _Pt, Polygon as _Poly
+        from shapely.prepared import prep as _prep
+    except Exception:
+        return mask
+
+    ny, nx = mask.shape
+    for bld in buildings:
+        outer = bld.get("outer", [])
+        if len(outer) < 3:
+            continue
+        try:
+            poly = _Poly(outer)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty:
+                continue
+            prep_poly = _prep(poly)
+        except Exception:
+            continue
+        min_lon, min_lat, max_lon, max_lat = poly.bounds
+        i0 = max(0, int((min_lon - lons[0]) / max(lons[-1] - lons[0], 1e-12) * (nx - 1)) - 1)
+        i1 = min(nx - 1, int((max_lon - lons[0]) / max(lons[-1] - lons[0], 1e-12) * (nx - 1)) + 1)
+        j0 = max(0, int((min_lat - lats[0]) / max(lats[-1] - lats[0], 1e-12) * (ny - 1)) - 1)
+        j1 = min(ny - 1, int((max_lat - lats[0]) / max(lats[-1] - lats[0], 1e-12) * (ny - 1)) + 1)
+        for j in range(j0, j1 + 1):
+            lat = lats[j]
+            for i in range(i0, i1 + 1):
+                if prep_poly.contains(_Pt(lons[i], lat)):
+                    mask[j, i] = 1.0
+    return mask
+
+
+def build_surface_infiltration_layers(tex_bytes, lons, lats, street_poly, raw_buildings,
+                                      street_depth=1.0, street_ramp=7.0,
+                                      runoff_pct=None):
+    """
+    Construye capas hidrológicas superficiales en orientación DEM (sur-arriba):
+      vegetación -> aumenta infiltración
+      edificios  -> impermeable
+      calles     -> impermeable, última prioridad visual/hidrológica
+    """
+    ny, nx = len(lats), len(lons)
+    runoff_pct, runoff_frac = normalize_runoff_pct(runoff_pct)
+    vegetation, method = build_vegetation_mask(tex_bytes, nx, ny)
+    buildings = rasterize_building_mask(lons, lats, raw_buildings)
+
+    _, street_mask_north = apply_street_profile_from_poly(
+        np.zeros((ny, nx), dtype=np.float32),
+        lons, lats, street_poly,
+        depth_m=max(0.1, street_depth),
+        ramp_m=max(0.1, street_ramp),
+    )
+    if street_mask_north:
+        streets = np.flipud(np.array(street_mask_north, dtype=np.float32).reshape(ny, nx))
+        streets = np.clip(streets, 0.0, 1.0)
+    else:
+        streets = np.zeros((ny, nx), dtype=np.float32)
+
+    base_infiltration = 1.0 - runoff_frac["base"]
+    vegetation_infiltration = 1.0 - runoff_frac["vegetation"]
+    building_infiltration = 1.0 - runoff_frac["building"]
+    street_infiltration = 1.0 - runoff_frac["street"]
+
+    veg = np.clip(vegetation, 0.0, 1.0)
+    infiltration = base_infiltration + (vegetation_infiltration - base_infiltration) * veg
+    infiltration = np.where(buildings > 0.5, building_infiltration, infiltration)
+    infiltration = np.where(streets > 0.05, street_infiltration, infiltration)
+    infiltration = np.clip(infiltration, 0.0, 1.0).astype(np.float32)
+    runoff = (1.0 - infiltration).astype(np.float32)
+
+    veg_span = vegetation_infiltration - base_infiltration
+    if abs(veg_span) > 1e-6:
+        pervious = np.clip((infiltration - base_infiltration) / veg_span, 0.0, 1.0)
+    else:
+        pervious = np.zeros_like(infiltration, dtype=np.float32)
+    stats = {
+        "method": method,
+        "vegetation_pct": round(float(np.mean(vegetation > 0.45) * 100.0), 1),
+        "building_pct": round(float(np.mean(buildings > 0.5) * 100.0), 1),
+        "street_pct": round(float(np.mean(streets > 0.05) * 100.0), 1),
+        "mean_infiltration": round(float(np.mean(infiltration)), 3),
+        "mean_runoff": round(float(np.mean(runoff)), 3),
+        "runoff_pct": {key: round(float(value), 1) for key, value in runoff_pct.items()},
+        "infiltration_pct": {key: round(float(100.0 - value), 1) for key, value in runoff_pct.items()},
+    }
+    print(
+        "  Infiltración superficial: "
+        f"veg={stats['vegetation_pct']}% edificios={stats['building_pct']}% "
+        f"calles={stats['street_pct']}% infil_media={stats['mean_infiltration']:.2f} "
+        f"escorrentia={stats['runoff_pct']}"
+    )
+    return {
+        "vegetation": vegetation,
+        "buildings": buildings,
+        "streets": streets,
+        "infiltration": infiltration,
+        "runoff": runoff,
+        "pervious": pervious.astype(np.float32),
+        "stats": stats,
+    }
+
+
+def surface_layers_to_threejs(surface_layers):
+    def pack(arr):
+        arr_north = np.flipud(np.asarray(arr, dtype=np.float32))
+        return np.round(np.clip(arr_north, 0.0, 1.0).ravel(), 4).tolist()
+
+    infiltration = surface_layers["infiltration"]
+    ny, nx = infiltration.shape
+    return {
+        "nx": int(nx),
+        "ny": int(ny),
+        "vegetation": pack(surface_layers["vegetation"]),
+        "infiltration": pack(surface_layers["infiltration"]),
+        "runoff": pack(surface_layers["runoff"]),
+        "buildings": pack(surface_layers["buildings"]),
+        "streets": pack(surface_layers["streets"]),
+        "stats": surface_layers["stats"],
+    }
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2489,6 +2949,8 @@ def downsample_hydrology_data(hydro, target_ny, target_nx, scale):
     dz_ds = np.where(no_flow, 0.0, dz_ds / mag)
 
     return {
+        "nx":             int(target_nx),
+        "ny":             int(target_ny),
         "accumulation":   np.round(acc_ds.ravel(), 4).tolist(),
         "arrow_dx":       np.round(dx_ds.ravel(), 4).tolist(),
         "arrow_dz":       np.round(dz_ds.ravel(), 4).tolist(),
@@ -2500,7 +2962,7 @@ def downsample_hydrology_data(hydro, target_ny, target_nx, scale):
     }
 
 
-def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None):
+def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None, source_weight=None):
     """
     Calcula direccion D8 y acumulacion de flujo, y prepara la carga util
     alineada con el DEM serializado para Three.js.
@@ -2540,6 +3002,16 @@ def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None):
         sink_ids_by_cell.setdefault((j, i), []).append(sink_id)
 
     sink_cells = set(sink_ids_by_cell.keys())
+
+    if source_weight is not None:
+        source_view = np.flipud(source_weight).astype(np.float64)
+        if source_view.shape != (ny, nx):
+            print("  AVISO: source_weight no coincide con DEM; usando lluvia uniforme")
+            source_view = np.ones((ny, nx), dtype=np.float64)
+        else:
+            source_view = np.clip(source_view, 0.0, 1.0)
+    else:
+        source_view = np.ones((ny, nx), dtype=np.float64)
 
     conditioned = fill_sinks_priority_flood(dem_view, epsilon=FLOW_FILL_EPS)
     flat_index = np.arange(ny * nx, dtype=np.int32).reshape(ny, nx)
@@ -2583,7 +3055,7 @@ def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None):
         if dst >= 0:
             indegree[dst] += 1
 
-    accumulation = np.ones(ny * nx, dtype=np.float64)
+    accumulation = source_view.ravel().copy()
     queue = list(np.where(indegree == 0)[0])
     head = 0
     while head < len(queue):
@@ -2794,7 +3266,7 @@ def download_vendors():
 #  8. GENERACIÓN DEL HTML
 # ─────────────────────────────────────────────────────────────
 
-def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center, street_poly_data=None):
+def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center, street_poly_data=None, surface_data=None):
     """
     Genera el HTML autocontenido con Three.js.
     - Curvas de nivel: visibles en 3D (sobre la superficie del terreno)
@@ -2814,11 +3286,41 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     tex_data_uri  = f"data:image/png;base64,{tex_b64}" if has_texture else ""
     has_catastro  = bool(catastro_b64)
     catastro_uri  = f"data:image/png;base64,{catastro_b64}" if has_catastro else ""
+    surface_stats = (surface_data or {}).get("stats", {})
+    surface_method = html_utils.escape(str(surface_stats.get("method", "sin datos")))
+    runoff_stats = surface_stats.get("runoff_pct", {}) if isinstance(surface_stats, dict) else {}
+    infiltration_stats = surface_stats.get("infiltration_pct", {}) if isinstance(surface_stats, dict) else {}
+
+    def _runoff_stat(key):
+        try:
+            return float(runoff_stats.get(key, DEFAULT_RUNOFF_PCT[key]))
+        except Exception:
+            return DEFAULT_RUNOFF_PCT[key]
+
+    def _infiltration_stat(key):
+        try:
+            return float(infiltration_stats.get(key, 100.0 - _runoff_stat(key)))
+        except Exception:
+            return DEFAULT_INFILTRATION_PCT[key]
+
+    try:
+        mean_runoff_pct = float(surface_stats.get("mean_runoff", 0.0)) * 100.0
+    except Exception:
+        mean_runoff_pct = 0.0
+    infiltration_label = html_utils.escape(
+        "Infiltracion asignada: suelo {base:.0f}%, vegetacion {vegetation:.0f}%, "
+        "edificios {building:.0f}%, calles {street:.0f}%".format(
+            base=_infiltration_stat("base"),
+            vegetation=_infiltration_stat("vegetation"),
+            building=_infiltration_stat("building"),
+            street=_infiltration_stat("street"),
+        )
+    )
 
     # Serializar datos para JS
     # Curvas de nivel: se muestran en 3D | Rutas GPS: solo para DEM, no se muestran
-    heights_json      = json.dumps(dem_data["heights"])
-    street_poly_json  = json.dumps(street_poly_data or [])
+    heights_json     = json.dumps(dem_data["heights"])
+    street_mask_json = json.dumps(dem_data.get("streetMask", []))
     contours_json  = json.dumps(contours_3d)
     rivers_json    = json.dumps(rivers_3d)
     drainage_json  = json.dumps(drainage_pts_3d)
@@ -2829,6 +3331,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     buildings_json = json.dumps(buildings_3d)
     curtain_json   = json.dumps(curtain) if curtain else "null"
     hydrology_json = json.dumps(hydrology_data)
+    surface_json   = json.dumps(surface_data or {})
 
     html = f"""<!DOCTYPE html>
 <html lang="es">
@@ -2961,6 +3464,14 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     background:#1a3852;
     border-color:rgba(111, 190, 255, 0.45);
   }}
+  .layer-btn--wide {{
+    display:block;
+    text-align:center;
+    text-decoration:none;
+    width:100%;
+    margin:0 0 10px;
+    padding:8px 10px;
+  }}
   #ui-buttons {{
     position:absolute;
     top:14px;
@@ -3015,6 +3526,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
 <div id="ui-buttons">
   <button id="toggle-panel-btn" class="floating-toggle" type="button">Capas</button>
   <button id="toggle-legend-btn" class="floating-toggle" type="button">Leyenda</button>
+  <a id="nav-tuner-btn" class="floating-toggle" href="http://localhost:8765/" target="_blank" rel="noopener" style="text-decoration:none">Ajustar excavación</a>
 </div>
 
 <div id="info">
@@ -3026,6 +3538,9 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <div class="stat">Ancho área: {dem_data['width_m']:.0f} m</div>
   <div class="stat">Alto área: {dem_data['height_m']:.0f} m</div>
   <div class="stat">Acum. máx flujo: {hydrology_data['max_accumulation']} celdas</div>
+  <div class="stat">Infiltración media: {(surface_data or {}).get('stats', {}).get('mean_infiltration', 0):.2f}</div>
+  <div class="stat">Escorrentia media: {mean_runoff_pct:.0f}%</div>
+  <div class="stat">Vegetación estimada: {(surface_data or {}).get('stats', {}).get('vegetation_pct', 0):.1f}%</div>
   <div class="stat">Nodos hidráulicos: {len(hydraulic_nodes_3d)}</div>
   <div class="stat">Entradas/salidas superficiales: {hydrology_data.get('sink_count', 0)}</div>
   <div class="stat">Edificios 3D: {len(buildings_3d)}</div>
@@ -3034,6 +3549,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
 
 <div id="layer-panel">
   <h3>Capas</h3>
+  <a class="layer-btn layer-btn--wide" href="http://localhost:8765/" target="_blank" rel="noopener">Ajustar excavación</a>
   <div class="layer-subtitle">Base</div>
   <label class="layer-row"><input type="radio" name="base-mode" value="simple" checked>Terreno simple</label>
   <label class="layer-row"><input type="radio" name="base-mode" value="satellite" {'disabled' if not has_texture else ''}>Imagen satelital{' (no disponible)' if not has_texture else ''}</label>
@@ -3091,6 +3607,18 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <label class="layer-row"><input id="toggle-rivers" type="checkbox">Ríos</label>
   <label class="layer-row"><input id="toggle-contours" type="checkbox">Curvas</label>
   <label class="layer-row"><input id="toggle-catastro" type="checkbox">Catastro</label>
+  <label class="layer-row"><input id="toggle-vegetation" type="checkbox">Vegetación IA</label>
+  <label class="layer-row"><input id="toggle-infiltration" type="checkbox">Infiltración</label>
+  <div class="layer-row layer-row--stack">
+    <span>Color infiltración</span>
+    <select id="infiltration-color-mode" class="layer-select">
+      <option value="classes" selected>Clases</option>
+      <option value="gradient">Degradado</option>
+    </select>
+  </div>
+  <div class="layer-note">Vegetación: {surface_method}</div>
+  <div class="layer-note">La acumulación usa escorrentía = lluvia - infiltración.</div>
+  <div class="layer-note">{infiltration_label}</div>
   <label class="layer-row"><input id="toggle-flow-accum" type="checkbox">Acumulación</label>
   <div class="layer-row layer-row--stack">
     <span>Color de acumulación</span>
@@ -3129,6 +3657,9 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <div class="leg-item"><span class="leg-swatch" style="background:#ff4dd2;height:4px"></span>Calles / red vial OSM</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#d6c39a;height:10px;border-radius:3px;border:1px solid rgba(255,255,255,0.2)"></span>Edificios Open Buildings</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#ffffff;height:8px;border:1px solid #4a4a4a"></span>Catastro SNIT</div>
+  <div class="leg-item"><span class="leg-swatch" style="background:#2ecc71;height:10px;border-radius:3px;opacity:0.8"></span>Vegetación detectada</div>
+  <div class="leg-item"><span class="leg-swatch" style="background:linear-gradient(90deg,#7d2f2a 0 20%,#d37b32 20% 40%,#e3c850 40% 60%,#7fbf4a 60% 80%,#248e5a 80%);height:10px;border-radius:3px"></span>Infiltración por clases</div>
+  <div class="leg-item"><span class="leg-swatch" style="background:linear-gradient(90deg,#80322c,#f2d56b,#2fbf71);height:10px;border-radius:3px"></span>Infiltración degradada</div>
   <div class="leg-item"><span id="flow-legend-swatch" class="leg-swatch" style="background:linear-gradient(90deg,rgba(255,224,128,0),rgba(255,224,128,1));height:10px;border-radius:3px"></span>Acumulación de flujo</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#8fe9ff;height:3px"></span>Flechas de flujo</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#ff9f1c;width:12px;height:12px;border-radius:50%"></span>Tragantes / sumideros</div>
@@ -3162,9 +3693,9 @@ const DEM = {{
   ny:      {dem_data['ny']},
   zMin:    {dem_data['z_min']},
   zMax:    {dem_data['z_max']},
-  heights: {heights_json}
+  heights:    {heights_json},
+  streetMask: {street_mask_json}
 }};
-const STREET_POLY_DATA = {street_poly_json};
 
 const CONTOURS       = {contours_json};
 const RIVERS         = {rivers_json};
@@ -3176,6 +3707,7 @@ const STREETS   = {streets_json};
 const BUILDINGS = {buildings_json};
 const CURTAIN        = {curtain_json};
 const HYDROLOGY      = {hydrology_json};
+const SURFACE        = {surface_json};
 const HAS_TEX        = {'true' if has_texture else 'false'};
 const TEX_URI        = "{tex_data_uri if has_texture else ''}";
 const HAS_CATASTRO   = {'true' if has_catastro else 'false'};
@@ -3230,6 +3762,8 @@ const streetOverlayLayer = new THREE.Group();
 const buildingLayer = new THREE.Group();
 const hydraulicNodeLayer = new THREE.Group();
 const hydraulicLinkLayer = new THREE.Group();
+const vegetationLayer = new THREE.Group();
+const infiltrationLayer = new THREE.Group();
 const greenLayer = new THREE.Group();
 const drainageLayer = new THREE.Group();
 const flowAccumLayer = new THREE.Group();
@@ -3237,7 +3771,8 @@ const flowArrowLayer = new THREE.Group();
 
 for (const layer of [
   baseTerrainLayer, catastroLayer, gridLayer, curtainLayer, contourLayer,
-  riverLayer, streetLayer, streetOverlayLayer, buildingLayer, hydraulicNodeLayer, hydraulicLinkLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
+  riverLayer, streetLayer, streetOverlayLayer, buildingLayer, hydraulicNodeLayer, hydraulicLinkLayer,
+  vegetationLayer, infiltrationLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
 ]) {{
   scene.add(layer);
 }}
@@ -3251,6 +3786,8 @@ const layerGroups = {{
   hydraulicNodes: hydraulicNodeLayer,
   hydraulicLinks: hydraulicLinkLayer,
   catastro: catastroLayer,
+  vegetation: vegetationLayer,
+  infiltration: infiltrationLayer,
   flowAccum: flowAccumLayer,
   flowArrows: flowArrowLayer,
   green: greenLayer,
@@ -3261,6 +3798,7 @@ const layerGroups = {{
 
 const viewerState = {{
   baseMode: 'simple',
+  infiltrationMode: 'classes',
   arrowDensity: 4,
   flowColor: '#ffe080',
   flowRangeMin: 0.18,
@@ -3283,6 +3821,8 @@ const viewerState = {{
   hydraulicNodes: true,
   hydraulicLinks: true,
   catastro: false,
+  vegetation: false,
+  infiltration: false,
   flowAccum: false,
   flowArrows: false,
   green: false,
@@ -3301,6 +3841,8 @@ const presetStates = {{
     hydraulicNodes: true,
     hydraulicLinks: false,
     catastro: false,
+    vegetation: false,
+    infiltration: false,
     flowAccum: false,
     flowArrows: false,
     green: false,
@@ -3317,6 +3859,8 @@ const presetStates = {{
     hydraulicNodes: true,
     hydraulicLinks: false,
     catastro: false,
+    vegetation: false,
+    infiltration: false,
     flowAccum: false,
     flowArrows: false,
     green: false,
@@ -3333,6 +3877,8 @@ const presetStates = {{
     hydraulicNodes: true,
     hydraulicLinks: false,
     catastro: HAS_CATASTRO && CATASTRO_URI,
+    vegetation: true,
+    infiltration: true,
     flowAccum: true,
     flowArrows: true,
     green: true,
@@ -3349,6 +3895,8 @@ const presetStates = {{
     hydraulicNodes: false,
     hydraulicLinks: false,
     catastro: false,
+    vegetation: false,
+    infiltration: false,
     flowAccum: false,
     flowArrows: false,
     green: false,
@@ -3386,6 +3934,7 @@ const uiFlowRangeLabel = document.getElementById('flow-range-label');
 const flowLegendSwatch = document.getElementById('flow-legend-swatch');
 const hydraulicLinkLegendSwatch = document.getElementById('hydraulic-link-legend-swatch');
 const arrowCountStat = document.getElementById('arrow-count-stat');
+const uiInfiltrationMode = document.getElementById('infiltration-color-mode');
 const uiToggles = {{
   streets: document.getElementById('toggle-streets'),
   streetOverlay: document.getElementById('toggle-street-overlay'),
@@ -3394,6 +3943,8 @@ const uiToggles = {{
   rivers: document.getElementById('toggle-rivers'),
   contours: document.getElementById('toggle-contours'),
   catastro: document.getElementById('toggle-catastro'),
+  vegetation: document.getElementById('toggle-vegetation'),
+  infiltration: document.getElementById('toggle-infiltration'),
   flowAccum: document.getElementById('toggle-flow-accum'),
   flowArrows: document.getElementById('toggle-flow-arrows'),
   green: document.getElementById('toggle-green'),
@@ -3750,12 +4301,18 @@ function rebuildFlowArrows() {{
   const config = ARROW_DENSITY_CONFIG[viewerState.arrowDensity] || ARROW_DENSITY_CONFIG[3];
   const stride = config.stride;
   const minStrength = config.minStrength;
-  const start = Math.min(Math.max(1, Math.floor(stride / 2)), Math.max(1, DEM.nx - 1));
+  // Las flechas viven en la grilla de la hidrología, no en la del DEM visual
+  const HNX = HYDROLOGY.nx || DEM.nx;
+  const HNY = HYDROLOGY.ny || DEM.ny;
+  const HCELL_W = DEM.widthM / Math.max(1, HNX - 1);
+  const HCELL_H = DEM.heightM / Math.max(1, HNY - 1);
+  const HCELL_MIN = Math.min(HCELL_W, HCELL_H);
+  const start = Math.min(Math.max(1, Math.floor(stride / 2)), Math.max(1, HNX - 1));
   let arrowCount = 0;
 
-  for (let j = start; j < DEM.ny - 1; j += stride) {{
-    for (let i = start; i < DEM.nx - 1; i += stride) {{
-      const idx = j * DEM.nx + i;
+  for (let j = start; j < HNY - 1; j += stride) {{
+    for (let i = start; i < HNX - 1; i += stride) {{
+      const idx = j * HNX + i;
       const strength = HYDROLOGY.arrow_strength[idx];
       const dx = HYDROLOGY.arrow_dx[idx];
       const dz = HYDROLOGY.arrow_dz[idx];
@@ -3763,11 +4320,11 @@ function rebuildFlowArrows() {{
         continue;
       }}
 
-      const x = -DEM.widthM / 2 + i * CELL_W;
-      const z = -DEM.heightM / 2 + j * CELL_H;
+      const x = -DEM.widthM / 2 + i * HCELL_W;
+      const z = -DEM.heightM / 2 + j * HCELL_H;
       const y = sampleTerrainHeight(x, z) + 2.2 + strength * 2.8;
       const dir = new THREE.Vector3(dx, -0.06, dz).normalize();
-      const length = Math.min(CELL_MIN * (1.7 + 3.1 * strength), stride * CELL_MIN * 0.78);
+      const length = Math.min(HCELL_MIN * (1.7 + 3.1 * strength), stride * HCELL_MIN * 0.78);
       const color = flowColor(Math.min(1, strength));
       const headLength = Math.max(5.5, length * 0.28);
       const headWidth = Math.max(3.0, length * 0.11);
@@ -3852,6 +4409,9 @@ function syncLayerPanel() {{
   if (uiBuildingRoofColor) {{
     uiBuildingRoofColor.value = viewerState.buildingRoofColor;
   }}
+  if (uiInfiltrationMode) {{
+    uiInfiltrationMode.value = viewerState.infiltrationMode || 'classes';
+  }}
   updateArrowDensityLabel();
   updateFlowRangeLabel();
   updateFlowLegendSwatch();
@@ -3890,7 +4450,7 @@ if (uiArrowDensity) {{
 if (uiStreetOverlayColor) {{
   uiStreetOverlayColor.addEventListener('input', () => {{
     viewerState.streetOverlayColor = uiStreetOverlayColor.value || '#3a3530';
-    if (streetOverlayMesh) streetOverlayMesh.material.color.set(viewerState.streetOverlayColor);
+    if (streetOverlayMesh) streetOverlayMesh.material.uniforms.uColor.value.set(viewerState.streetOverlayColor);
   }});
 }}
 if (uiStreetOverlayOpacity) {{
@@ -3898,7 +4458,7 @@ if (uiStreetOverlayOpacity) {{
     viewerState.streetOverlayOpacity = clamp((Number(uiStreetOverlayOpacity.value) || 90) / 100, 0, 1);
     if (uiStreetOverlayOpacityLabel)
       uiStreetOverlayOpacityLabel.textContent = `${{Math.round(viewerState.streetOverlayOpacity * 100)}}%`;
-    if (streetOverlayMesh) streetOverlayMesh.material.opacity = viewerState.streetOverlayOpacity;
+    if (streetOverlayMesh) streetOverlayMesh.material.uniforms.uOpacity.value = viewerState.streetOverlayOpacity;
   }});
 }}
 
@@ -3906,6 +4466,14 @@ if (uiFlowColor) {{
   uiFlowColor.addEventListener('input', () => {{
     viewerState.flowColor = uiFlowColor.value || '#ffe080';
     rebuildFlowAccumulation();
+  }});
+}}
+
+if (uiInfiltrationMode) {{
+  uiInfiltrationMode.addEventListener('change', () => {{
+    viewerState.infiltrationMode = uiInfiltrationMode.value || 'classes';
+    rebuildInfiltrationLayer();
+    applyViewerState();
   }});
 }}
 
@@ -4115,15 +4683,23 @@ function buildSimpleTerrainMaterial(geo) {{
 (function buildFlowAccumulation() {{
   if (!HYDROLOGY.accumulation || !HYDROLOGY.accumulation.length) return;
 
+  // La hidrología vive en su propia grilla (HYDROLOGY.nx × ny), distinta del
+  // DEM visual (660×660). Construimos la malla a la resolución de la hidrología
+  // y muestreamos la altura del terreno por coordenada mundo.
+  const HNX = HYDROLOGY.nx || DEM.nx;
+  const HNY = HYDROLOGY.ny || DEM.ny;
   const geo = new THREE.PlaneGeometry(
     DEM.widthM, DEM.heightM,
-    DEM.nx - 1, DEM.ny - 1
+    HNX - 1, HNY - 1
   );
   const pos = geo.attributes.position;
   const colors = new Float32Array(pos.count * 4);
 
   for (let i = 0; i < pos.count; i++) {{
-    pos.setZ(i, DEM.heights[i] + 0.95);
+    // coords locales del plano → mundo (x=x_local, z=-y_local tras rotación)
+    const wx = pos.getX(i);
+    const wz = -pos.getY(i);
+    pos.setZ(i, sampleTerrainHeight(wx, wz) + 0.95);
   }}
   pos.needsUpdate = true;
   flowAccumColorAttr = new THREE.BufferAttribute(colors, 4);
@@ -4145,6 +4721,113 @@ function buildSimpleTerrainMaterial(geo) {{
   flowAccumMesh = overlay;
   flowAccumLayer.add(overlay);
   rebuildFlowAccumulation();
+}})();
+
+function infiltrationGradientColor(value) {{
+  const t = clamp(value, 0, 1);
+  const low = [128, 50, 44];
+  const mid = [242, 213, 107];
+  const high = [47, 191, 113];
+  const a = t < 0.5 ? low : mid;
+  const b = t < 0.5 ? mid : high;
+  const f = t < 0.5 ? t / 0.5 : (t - 0.5) / 0.5;
+  return [
+    lerp(a[0], b[0], f) / 255,
+    lerp(a[1], b[1], f) / 255,
+    lerp(a[2], b[2], f) / 255,
+  ];
+}}
+
+function infiltrationClassColor(value) {{
+  const t = clamp(value, 0, 1);
+  if (t < 0.20) return [0.49, 0.18, 0.16]; // muy baja
+  if (t < 0.40) return [0.83, 0.48, 0.20]; // baja
+  if (t < 0.60) return [0.89, 0.78, 0.31]; // media
+  if (t < 0.80) return [0.50, 0.75, 0.29]; // alta
+  return [0.14, 0.56, 0.35];               // muy alta
+}}
+
+function infiltrationColor(value) {{
+  return viewerState.infiltrationMode === 'gradient'
+    ? infiltrationGradientColor(value)
+    : infiltrationClassColor(value);
+}}
+
+function buildRasterOverlay(group, values, mode, zOffset, renderOrder) {{
+  clearGroup(group);
+  if (!SURFACE || !SURFACE.nx || !SURFACE.ny || !values || !values.length) return;
+  const HNX = SURFACE.nx;
+  const HNY = SURFACE.ny;
+  const geo = new THREE.PlaneGeometry(DEM.widthM, DEM.heightM, HNX - 1, HNY - 1);
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 3);
+  const alphas = new Float32Array(pos.count);
+
+  for (let i = 0; i < pos.count; i++) {{
+    const wx = pos.getX(i);
+    const wz = -pos.getY(i);
+    pos.setZ(i, sampleTerrainHeight(wx, wz) + zOffset);
+    const value = clamp(values[i] || 0, 0, 1);
+    let c;
+    let alpha;
+    if (mode === 'vegetation') {{
+      c = [0.13, 0.80, 0.36];
+      alpha = Math.pow(value, 0.75) * 0.72;
+      if (value < 0.12) alpha = 0;
+    }} else {{
+      c = infiltrationColor(value);
+      alpha = viewerState.infiltrationMode === 'gradient' ? 0.58 : 0.66;
+    }}
+    colors[i * 3 + 0] = c[0];
+    colors[i * 3 + 1] = c[1];
+    colors[i * 3 + 2] = c[2];
+    alphas[i] = alpha;
+  }}
+  pos.needsUpdate = true;
+  geo.setAttribute('overlayColor', new THREE.BufferAttribute(colors, 3));
+  geo.setAttribute('overlayAlpha', new THREE.BufferAttribute(alphas, 1));
+
+  const mat = new THREE.ShaderMaterial({{
+    vertexShader: `
+      attribute vec3 overlayColor;
+      attribute float overlayAlpha;
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {{
+        vColor = overlayColor;
+        vAlpha = overlayAlpha;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }}
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      varying float vAlpha;
+      void main() {{
+        if (vAlpha <= 0.01) discard;
+        gl_FragColor = vec4(vColor, vAlpha);
+      }}
+    `,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -3,
+  }});
+  const overlay = new THREE.Mesh(geo, mat);
+  overlay.rotation.x = -Math.PI / 2;
+  overlay.renderOrder = renderOrder;
+  group.add(overlay);
+}}
+
+function rebuildInfiltrationLayer() {{
+  buildRasterOverlay(infiltrationLayer, SURFACE.infiltration, 'infiltration', 1.18, 2.5);
+  infiltrationLayer.visible = !!viewerState.infiltration;
+}}
+
+(function buildSurfaceOverlays() {{
+  buildRasterOverlay(vegetationLayer, SURFACE.vegetation, 'vegetation', 1.05, 2.4);
+  rebuildInfiltrationLayer();
 }})();
 
 const gridSize = Math.max(DEM.widthM, DEM.heightM) * 1.2;
@@ -4224,53 +4907,86 @@ for (const street of STREETS) {{
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 // ═══════════════════════════════════════════════════════════════
-//  OVERLAY DE COLOR DE CALLES  (geometría directa desde polígono)
+//  OVERLAY DE COLOR DE CALLES  (malla DEM + ShaderMaterial per-vertex)
 // ═══════════════════════════════════════════════════════════════
 let streetOverlayMesh = null;
 
-function sampleDEMHeight(sx, sz) {{
-  const u = (sx + DEM.widthM  * 0.5) / DEM.widthM;
-  const v = (sz + DEM.heightM * 0.5) / DEM.heightM;
-  const i = Math.min(DEM.nx-1, Math.max(0, Math.round(u*(DEM.nx-1))));
-  const j = Math.min(DEM.ny-1, Math.max(0, Math.round(v*(DEM.ny-1))));
-  return DEM.heights[j*DEM.nx+i] || 0;
-}}
-
-function buildStreetPolyLayer() {{
+function buildStreetOverlay() {{
   clearGroup(streetOverlayLayer);
   streetOverlayMesh = null;
-  if (!STREET_POLY_DATA || !STREET_POLY_DATA.length) return;
+  if (!DEM.streetMask || !DEM.streetMask.length) return;
 
-  const ELEV_OFFSET = 0.25;
-  const allPos = [], allIdx = [];
-  let base = 0;
+  const ny = DEM.ny, nx = DEM.nx;
+  const ELEV_OFFSET = 0.15;
+  const positions = new Float32Array(ny * nx * 3);
+  const masks     = new Float32Array(ny * nx);
 
-  // Cada entrada es un quad: [[x0,z0],[x1,z1],[x2,z2],[x3,z3]]
-  for (const quad of STREET_POLY_DATA) {{
-    for (const [x, z] of quad) {{
-      allPos.push(x, sampleDEMHeight(x, z) + ELEV_OFFSET, z);
+  for (let j = 0; j < ny; j++) {{
+    for (let i = 0; i < nx; i++) {{
+      const idx = j * nx + i;
+      const base3 = idx * 3;
+      positions[base3]   = -DEM.widthM  / 2 + i / (nx-1) * DEM.widthM;
+      positions[base3+1] = DEM.heights[idx] + ELEV_OFFSET;
+      positions[base3+2] = -DEM.heightM / 2 + j / (ny-1) * DEM.heightM;
+      masks[idx] = DEM.streetMask[idx];
     }}
-    // Dos triángulos: [0,1,2] y [0,2,3]
-    allIdx.push(base, base+1, base+2, base, base+2, base+3);
-    base += 4;
   }}
 
-  if (!allIdx.length) return;
+  // Solo triángulos donde al menos un vértice tiene máscara > umbral mínimo
+  const THRESH = 0.005;
+  const idxBuf = [];
+  for (let j = 0; j < ny-1; j++) {{
+    for (let i = 0; i < nx-1; i++) {{
+      const a = j*nx+i, b = j*nx+i+1, c = (j+1)*nx+i, d = (j+1)*nx+i+1;
+      if (Math.max(masks[a], masks[b], masks[c], masks[d]) > THRESH) {{
+        idxBuf.push(a,c,b, b,c,d);
+      }}
+    }}
+  }}
+  if (!idxBuf.length) return;
+
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(allPos), 3));
-  geo.setIndex(allIdx);
-  geo.computeVertexNormals();
-  streetOverlayMesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({{
-    color: new THREE.Color(viewerState.streetOverlayColor),
-    transparent: true, opacity: viewerState.streetOverlayOpacity,
-    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2,
-    side: THREE.DoubleSide,
-  }}));
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('maskVal',  new THREE.BufferAttribute(masks, 1));
+  geo.setIndex(idxBuf);
+
+  // ShaderMaterial: la GPU interpola maskVal entre vértices → bordes suaves
+  const mat = new THREE.ShaderMaterial({{
+    uniforms: {{
+      uColor:   {{ value: new THREE.Color(viewerState.streetOverlayColor) }},
+      uOpacity: {{ value: viewerState.streetOverlayOpacity }},
+    }},
+    vertexShader: `
+      attribute float maskVal;
+      varying float vMask;
+      void main() {{
+        vMask = maskVal;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+      }}
+    `,
+    fragmentShader: `
+      uniform vec3  uColor;
+      uniform float uOpacity;
+      varying float vMask;
+      void main() {{
+        if (vMask < 0.01) discard;
+        float a = uOpacity * smoothstep(0.0, 0.18, vMask);
+        gl_FragColor = vec4(uColor, a);
+      }}
+    `,
+    transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -2,
+  }});
+
+  streetOverlayMesh = new THREE.Mesh(geo, mat);
   streetOverlayMesh.renderOrder = 1;
   streetOverlayLayer.add(streetOverlayMesh);
 }}
 
-buildStreetPolyLayer();
+buildStreetOverlay();
 
 rebuildHydraulicLinks();
 
@@ -4487,10 +5203,22 @@ animate();
 #  MAIN
 # ─────────────────────────────────────────────────────────────
 
-def main():
+def main(street_depth=1.5, street_ramp=7.0, street_width=1.0,
+         river_depth=2.5, river_width=4.0,
+         runoff_base_pct=DEFAULT_RUNOFF_PCT["base"],
+         runoff_vegetation_pct=DEFAULT_RUNOFF_PCT["vegetation"],
+         runoff_building_pct=DEFAULT_RUNOFF_PCT["building"],
+         runoff_street_pct=DEFAULT_RUNOFF_PCT["street"]):
     print("=" * 60)
     print("  Generador 3D Terreno – Cariari, Costa Rica")
     print("=" * 60)
+    runoff_pct, _ = normalize_runoff_pct({
+        "base": runoff_base_pct,
+        "vegetation": runoff_vegetation_pct,
+        "building": runoff_building_pct,
+        "street": runoff_street_pct,
+    })
+    infiltration_pct = {key: round(100.0 - value, 1) for key, value in runoff_pct.items()}
 
     # Crear directorios
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -4594,7 +5322,7 @@ def main():
     # Ríos (Cauce.shp) + tallar cañón en el DEM
     print("\n[6b] Leyendo ríos (Cauce.shp) y tallando cañón en DEM ...")
     raw_rivers = read_cauce_rivers(CAUCE_SHP, lon_min, lat_min, lon_max, lat_max)
-    dem = carve_river_canyon(dem, lons, lats, raw_rivers, depth_m=2.5, half_width_m=4.0)
+    dem = carve_river_canyon(dem, lons, lats, raw_rivers, depth_m=river_depth, half_width_m=river_width)
 
     # Puntos de desfogue
     print("\n[6c] Leyendo puntos de desfogue ...")
@@ -4618,7 +5346,7 @@ def main():
     raw_streets = download_osm_streets(lon_min, lat_min, lon_max, lat_max)
 
     print("\n[6e2] Construyendo polígonos de área de calles ...")
-    street_poly = build_street_polygons(raw_streets, lat_center)
+    street_poly = build_street_polygons(raw_streets, lat_center, width_scale=street_width)
 
     print("\n[6f] Armando red hidraulica preliminar ...")
     hydraulic_links = build_hydraulic_network(hydraulic_structures, raw_drain_pts, raw_streets)
@@ -4627,6 +5355,14 @@ def main():
     print("\n[6g] Leyendo Open Buildings ...")
     raw_buildings = read_open_buildings_geojson(OPEN_BUILDINGS_GEOJSON, lon_min, lat_min, lon_max, lat_max)
     buildings_3d = buildings_to_threejs(raw_buildings, lon_center, lat_center)
+
+    print("\n[6g1] Calculando vegetación, impermeables e infiltración ...")
+    surface_layers = build_surface_infiltration_layers(
+        tex_bytes, lons, lats, street_poly, raw_buildings,
+        street_depth=street_depth, street_ramp=street_ramp,
+        runoff_pct=runoff_pct,
+    )
+    surface_data = surface_layers_to_threejs(surface_layers)
 
     # Edificios sobre el DEM de baja resolución (220×220, para lookups de elevación)
     print("\n[6g2] Aplicando edificios al DEM visual ...")
@@ -4639,19 +5375,32 @@ def main():
     lons_vis = _np_vis.linspace(lons[0], lons[-1], GRID_RESOLUTION * FLOW_RESOLUTION_SCALE)
     lats_vis = _np_vis.linspace(lats[0], lats[-1], GRID_RESOLUTION * FLOW_RESOLUTION_SCALE)
     dem_vis = upsample_dem_numpy(dem_base, FLOW_RESOLUTION_SCALE)
+    dem_vis_base = dem_vis.copy()   # base puro (sin río/calles) para el preview
     dem_vis = carve_river_canyon(dem_vis, lons_vis, lats_vis, raw_rivers,
-                                 depth_m=2.5, half_width_m=4.0)
+                                 depth_m=river_depth, half_width_m=river_width)
     dem_vis = raise_building_obstacles(dem_vis, lons_vis, lats_vis, raw_buildings,
                                        wall_height_m=2.0)
     dem_vis, street_mask = apply_street_profile_from_poly(dem_vis, lons_vis, lats_vis,
-                                                          street_poly, depth_m=1.5, ramp_m=7.0)
+                                                          street_poly, depth_m=street_depth, ramp_m=street_ramp)
     print(f"  DEM visual final: zMin={dem_vis.min():.1f}m  zMax={dem_vis.max():.1f}m")
+    save_preview_patch(dem_vis_base, lons_vis, lats_vis,
+                       raw_streets, raw_rivers, raw_buildings, tex_bytes,
+                       OUT_DIR / "preview_patch.json",
+                       settings={
+                           "street_depth": round(float(street_depth), 1),
+                           "street_width": round(float(street_width), 1),
+                           "street_ramp": round(float(street_ramp), 1),
+                           "river_depth": round(float(river_depth), 1),
+                           "river_width": round(float(river_width), 1),
+                           "runoff_pct": runoff_pct,
+                           "infiltration_pct": infiltration_pct,
+                       })
 
     # Preparar malla 3D desde DEM alta resolución
     print("\n[6g4] Preparando malla 3D ...")
-    streets_3d      = streets_to_threejs(raw_streets, lon_center, lat_center, dem, lons, lats)
-    dem_data        = prepare_dem_for_threejs(dem_vis, lons_vis, lats_vis, lon_center, lat_center)
-    street_poly_3d  = street_segments_to_threejs(raw_streets, lon_center, lat_center)
+    streets_3d  = streets_to_threejs(raw_streets, lon_center, lat_center, dem, lons, lats)
+    dem_data    = prepare_dem_for_threejs(dem_vis, lons_vis, lats_vis, lon_center, lat_center)
+    dem_data["streetMask"] = street_mask   # per-vertex mask para ShaderMaterial overlay
     contours_3d = contours_to_threejs(contours_dict, lon_center, lat_center, dem, lons, lats)
     rivers_3d   = rivers_to_threejs(raw_rivers, lon_center, lat_center, dem, lons, lats)
 
@@ -4672,13 +5421,14 @@ def main():
     dem_flow_hi = upsample_dem_numpy(dem_base, FLOW_RESOLUTION_SCALE)
     print("  [6h-a] Tallando cauces Gaussianos a alta resolución ...")
     dem_flow_hi = carve_river_canyon(dem_flow_hi, lons_hi, lats_hi, raw_rivers,
-                                      depth_m=2.5, half_width_m=4.0)
+                                      depth_m=river_depth, half_width_m=river_width)
     print("  [6h-b] Elevando obstáculos de edificios a alta resolución ...")
     dem_flow_hi = raise_building_obstacles(dem_flow_hi, lons_hi, lats_hi, raw_buildings,
                                             wall_height_m=2.0)
     print("  [6h-c] Tallando canales de calle rectangulares a alta resolución ...")
     dem_flow_hi = carve_street_channels(dem_flow_hi, lons_hi, lats_hi, raw_streets,
-                                         depth_m=1.5, half_width_m=4.0)
+                                         depth_m=street_depth, half_width_m=3.5 * street_width)
+    runoff_weight_hi = upsample_dem_numpy(surface_layers["runoff"], FLOW_RESOLUTION_SCALE)
 
     surface_sinks = [
         {"id": item["id"], "lon": item["lon"], "lat": item["lat"]}
@@ -4689,7 +5439,8 @@ def main():
     ]
     print(f"\n[6h2] Calculando hidrología fina ({ny_hi}×{nx_hi}) ...")
     hydrology_hires = build_flow_hydrology(dem_flow_hi, lons_hi, lats_hi, lat_center,
-                                            surface_sinks=surface_sinks)
+                                            surface_sinks=surface_sinks,
+                                            source_weight=runoff_weight_hi)
     print(f"  Reduciendo a {ny_vis}×{nx_vis} para visualización ...")
     hydrology_data = downsample_hydrology_data(hydrology_hires, ny_vis, nx_vis, FLOW_RESOLUTION_SCALE)
     hydraulic_nodes_3d = hydraulic_nodes_to_threejs(hydraulic_structures, lon_center, lat_center, dem, lons, lats, hydrology_data)
@@ -4706,12 +5457,17 @@ def main():
         hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d,
         streets_3d, buildings_3d,
         tex_b64, catastro_b64, vendor_js, lon_center, lat_center,
-        street_poly_data=street_poly_3d
+        surface_data=surface_data
     )
 
     html_size = len(html_content.encode("utf-8"))
-    with open(OUT_HTML, "w", encoding="utf-8") as f:
+    # Escritura atómica: escribir a temporal y renombrar, para que ningún
+    # servidor (p.ej. app.py en :8000) sirva un archivo a medio escribir.
+    _tmp_html = OUT_HTML.with_suffix(".html.tmp")
+    with open(_tmp_html, "w", encoding="utf-8") as f:
         f.write(html_content)
+    import os as _os
+    _os.replace(_tmp_html, OUT_HTML)
 
     print(f"\n{'='*60}")
     print(f"  ✅ HTML generado: {OUT_HTML}")
@@ -4739,4 +5495,47 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    ap = argparse.ArgumentParser(description="Generador 3D Terreno Cariari")
+    ap.add_argument("--street-depth", type=float, default=1.5, metavar="M",
+                    help="Profundidad de excavación calles en metros (default 1.5)")
+    ap.add_argument("--street-ramp",  type=float, default=7.0, metavar="M",
+                    help="Ancho del borde/transición lateral de calles en metros (default 7.0)")
+    ap.add_argument("--street-width", type=float, default=1.0, metavar="X",
+                    help="Multiplicador del ancho de calles, 1.0 = real (default 1.0)")
+    ap.add_argument("--river-depth",  type=float, default=2.5, metavar="M",
+                    help="Profundidad de cauce de ríos en metros (default 2.5)")
+    ap.add_argument("--river-width",  type=float, default=4.0, metavar="M",
+                    help="Ancho lateral del cauce de ríos en metros (default 4.0)")
+    ap.add_argument("--runoff-base-pct", type=float, default=DEFAULT_RUNOFF_PCT["base"], metavar="PCT",
+                    help="Escorrentia de suelo abierto en porcentaje (default 78)")
+    ap.add_argument("--runoff-vegetation-pct", type=float, default=DEFAULT_RUNOFF_PCT["vegetation"], metavar="PCT",
+                    help="Escorrentia de vegetacion en porcentaje (default 10)")
+    ap.add_argument("--runoff-building-pct", type=float, default=DEFAULT_RUNOFF_PCT["building"], metavar="PCT",
+                    help="Escorrentia de edificios en porcentaje (default 98)")
+    ap.add_argument("--runoff-street-pct", type=float, default=DEFAULT_RUNOFF_PCT["street"], metavar="PCT",
+                    help="Escorrentia de calles en porcentaje (default 94)")
+    ap.add_argument("--infiltration-base-pct", type=float, default=None, metavar="PCT",
+                    help="Infiltracion de suelo abierto en porcentaje; si se indica, reemplaza --runoff-base-pct")
+    ap.add_argument("--infiltration-vegetation-pct", type=float, default=None, metavar="PCT",
+                    help="Infiltracion de vegetacion en porcentaje; si se indica, reemplaza --runoff-vegetation-pct")
+    ap.add_argument("--infiltration-building-pct", type=float, default=None, metavar="PCT",
+                    help="Infiltracion de edificios en porcentaje; si se indica, reemplaza --runoff-building-pct")
+    ap.add_argument("--infiltration-street-pct", type=float, default=None, metavar="PCT",
+                    help="Infiltracion de calles en porcentaje; si se indica, reemplaza --runoff-street-pct")
+    args = ap.parse_args()
+    if args.infiltration_base_pct is not None:
+        args.runoff_base_pct = 100.0 - _clamp_pct(args.infiltration_base_pct, DEFAULT_INFILTRATION_PCT["base"])
+    if args.infiltration_vegetation_pct is not None:
+        args.runoff_vegetation_pct = 100.0 - _clamp_pct(args.infiltration_vegetation_pct, DEFAULT_INFILTRATION_PCT["vegetation"])
+    if args.infiltration_building_pct is not None:
+        args.runoff_building_pct = 100.0 - _clamp_pct(args.infiltration_building_pct, DEFAULT_INFILTRATION_PCT["building"])
+    if args.infiltration_street_pct is not None:
+        args.runoff_street_pct = 100.0 - _clamp_pct(args.infiltration_street_pct, DEFAULT_INFILTRATION_PCT["street"])
+    main(street_depth=args.street_depth, street_ramp=args.street_ramp,
+         street_width=args.street_width,
+         river_depth=args.river_depth, river_width=args.river_width,
+         runoff_base_pct=args.runoff_base_pct,
+         runoff_vegetation_pct=args.runoff_vegetation_pct,
+         runoff_building_pct=args.runoff_building_pct,
+         runoff_street_pct=args.runoff_street_pct)
