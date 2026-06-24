@@ -1,0 +1,56 @@
+[TITLE]
+Cariari external-inflow MVP model
+
+[OPTIONS]
+FLOW_UNITS           CMS
+INFILTRATION         HORTON
+FLOW_ROUTING         DYNWAVE
+START_DATE           01/01/2026
+START_TIME           00:00:00
+REPORT_START_DATE    01/01/2026
+REPORT_START_TIME    00:00:00
+END_DATE             01/01/2026
+END_TIME             01:00:00
+SWEEP_START          01/01
+SWEEP_END            12/31
+DRY_DAYS             0
+REPORT_STEP          00:05:00
+WET_STEP             00:05:00
+DRY_STEP             00:05:00
+ROUTING_STEP         00:00:30
+ALLOW_PONDING        YES
+
+[JUNCTIONS]
+;;Name           Elevation  MaxDepth   InitDepth  SurDepth   Aponded
+T1               12.000     2.000      0          0.50       0
+T2               11.600     2.000      0          0.50       0
+J1               11.200     2.500      0          0.50       0
+
+[OUTFALLS]
+;;Name           Elevation  Type       Stage Data       Gated
+O1               10.700     FREE                         NO
+
+[CONDUITS]
+;;Name           From Node        To Node          Length     Roughness  InOffset OutOffset InitFlow MaxFlow
+C_T1_J1          T1               J1               85.000     0.0130     0        0         0        0
+C_T2_J1          T2               J1               70.000     0.0130     0        0         0        0
+C_J1_O1          J1               O1               120.000    0.0130     0        0         0        0
+
+[XSECTIONS]
+;;Link           Shape       Geom1      Geom2      Geom3      Geom4      Barrels
+C_T1_J1          CIRCULAR    0.600      0          0          0          1
+C_T2_J1          CIRCULAR    0.600      0          0          0          1
+C_J1_O1          CIRCULAR    0.800      0          0          0          1
+
+[COORDINATES]
+;;Node           X-Coord          Y-Coord
+T1               0.000            80.000
+T2               75.000           85.000
+J1               40.000           30.000
+O1               40.000           0.000
+
+[REPORT]
+INPUT      YES
+CONTROLS   NO
+NODES ALL
+LINKS ALL
