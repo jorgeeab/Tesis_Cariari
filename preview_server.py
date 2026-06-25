@@ -206,8 +206,6 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;
   border:none;border-radius:6px;padding:8px;cursor:pointer;
   font-size:12px;width:100%;transition:background .15s;
 }
-#btn-update{background:#1f6feb;color:#fff}
-#btn-update:hover{background:#388bfd}
 #btn-run{background:#238636;color:#fff;margin-top:2px}
 #btn-run:hover:not(:disabled){background:#2ea043}
 #btn-run:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
@@ -396,8 +394,6 @@ T2:T2</textarea>
     <label><input type="checkbox" id="sl-bld" checked style="vertical-align:middle"> Casas (edificios)</label>
     <input type="color" id="sl-bcol" value="#d9c2a6" style="width:42px;height:24px;border:none;background:none;cursor:pointer">
   </div>
-
-  <button class="btn" id="btn-update">&#8635; Actualizar vista (o suelta slider)</button>
 
   <div class="sub" style="margin-top:4px">Mapa principal</div>
   <button class="btn" id="btn-run">&#9654; Aplicar al mapa principal</button>
@@ -871,8 +867,6 @@ infiltrationSliders.forEach(id=>{
 document.getElementById('sl-scol').addEventListener('input',redraw);
 document.getElementById('sl-rcol').addEventListener('input',redraw);
 document.getElementById('sl-bcol').addEventListener('input',redraw);
-document.getElementById('btn-update').addEventListener('click',redraw);
-
 // ── Aplicar al mapa principal ───────────────────────────────────────────────
 const btnRun=document.getElementById('btn-run');
 const btnSaveSwmm=document.getElementById('btn-save-swmm');
