@@ -23,6 +23,32 @@ PATCH_FILE = BASE_DIR / "resultados_refinados" / "preview_patch.json"
 SCRIPT     = BASE_DIR / "generar_dem_3d_threejs_satelital.py"
 VENDOR_DIR = BASE_DIR / "resultados_refinados" / "_vendor_threejs"
 MAP_HTML   = BASE_DIR / "resultados_refinados" / "Refinado_30_ThreeJS_Cortina_Ajustada.html"
+SWMM_CONFIG_FILE = BASE_DIR / "results" / "swmm" / "ui_scenario.json"
+
+DEFAULT_SWMM_CONFIG = {
+    "rainfall": {
+        "scenario_name": "tormenta-base",
+        "duration_min": 30.0,
+        "interval_min": 5.0,
+        "intensity_mm_h": 60.0,
+        "safety_factor": 1.0,
+    },
+    "capture": {
+        "active": True,
+        "capture_mode": "complete",
+        "nominal_capacity_l_s": 100.0,
+        "capture_efficiency": 1.0,
+        "obstruction_pct": 0.0,
+        "surface_storage_m3": 0.0,
+        "allow_bypass": True,
+    },
+    "swmm": {
+        "inp_path": "models/cariari_base.inp",
+        "report_step_min": 5.0,
+        "node_mapping_text": "T1:T1\nT2:T2",
+        "node_mapping": {"T1": "T1", "T2": "T2"},
+    },
+}
 
 # ── Cargar librería Three.js desde vendor local ──────────────────────────────
 def _read_vendor(pattern):
@@ -39,6 +65,107 @@ def load_patch_json():
         return None
     return PATCH_FILE.read_text(encoding="utf-8")
 
+
+def load_swmm_config():
+    if not SWMM_CONFIG_FILE.exists():
+        return DEFAULT_SWMM_CONFIG
+    try:
+        saved = json.loads(SWMM_CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return DEFAULT_SWMM_CONFIG
+    return _deep_merge(DEFAULT_SWMM_CONFIG, saved)
+
+
+def load_swmm_config_json():
+    return json.dumps(load_swmm_config(), ensure_ascii=False)
+
+
+def _deep_merge(base, override):
+    out = dict(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def _getf(qs, key, default, lo=None, hi=None):
+    try:
+        value = float(qs.get(key, [default])[0])
+    except Exception:
+        value = float(default)
+    if lo is not None:
+        value = max(float(lo), value)
+    if hi is not None:
+        value = min(float(hi), value)
+    return value
+
+
+def _getstr(qs, key, default):
+    value = qs.get(key, [default])[0]
+    return str(value).strip() or default
+
+
+def _getbool(qs, key, default=True):
+    raw = str(qs.get(key, ["1" if default else "0"])[0]).strip().lower()
+    return raw in {"1", "true", "yes", "on", "si"}
+
+
+def _parse_node_mapping(text):
+    mapping = {}
+    for raw in str(text or "").replace(";", "\n").replace(",", "\n").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if ":" in line:
+            left, right = line.split(":", 1)
+        elif "=" in line:
+            left, right = line.split("=", 1)
+        else:
+            left, right = line, line
+        left, right = left.strip(), right.strip()
+        if left and right:
+            mapping[left] = right
+    return mapping
+
+
+def build_swmm_config_from_query(qs):
+    node_mapping_text = _getstr(qs, "node_mapping", DEFAULT_SWMM_CONFIG["swmm"]["node_mapping_text"])
+    config = {
+        "rainfall": {
+            "scenario_name": _getstr(qs, "scenario_name", DEFAULT_SWMM_CONFIG["rainfall"]["scenario_name"]),
+            "duration_min": _getf(qs, "rain_duration_min", DEFAULT_SWMM_CONFIG["rainfall"]["duration_min"], 1, 1440),
+            "interval_min": _getf(qs, "rain_interval_min", DEFAULT_SWMM_CONFIG["rainfall"]["interval_min"], 0.5, 240),
+            "intensity_mm_h": _getf(qs, "rain_intensity_mm_h", DEFAULT_SWMM_CONFIG["rainfall"]["intensity_mm_h"], 0, 500),
+            "safety_factor": _getf(qs, "rain_safety_factor", DEFAULT_SWMM_CONFIG["rainfall"]["safety_factor"], 0.1, 5),
+        },
+        "capture": {
+            "active": _getbool(qs, "capture_active", DEFAULT_SWMM_CONFIG["capture"]["active"]),
+            "capture_mode": _getstr(qs, "capture_mode", DEFAULT_SWMM_CONFIG["capture"]["capture_mode"]),
+            "nominal_capacity_l_s": _getf(qs, "nominal_capacity_l_s", DEFAULT_SWMM_CONFIG["capture"]["nominal_capacity_l_s"], 0, 5000),
+            "capture_efficiency": _getf(qs, "capture_efficiency", DEFAULT_SWMM_CONFIG["capture"]["capture_efficiency"], 0, 1),
+            "obstruction_pct": _getf(qs, "obstruction_pct", DEFAULT_SWMM_CONFIG["capture"]["obstruction_pct"], 0, 100),
+            "surface_storage_m3": _getf(qs, "surface_storage_m3", DEFAULT_SWMM_CONFIG["capture"]["surface_storage_m3"], 0, 100000),
+            "allow_bypass": _getbool(qs, "allow_bypass", DEFAULT_SWMM_CONFIG["capture"]["allow_bypass"]),
+        },
+        "swmm": {
+            "inp_path": _getstr(qs, "inp_path", DEFAULT_SWMM_CONFIG["swmm"]["inp_path"]),
+            "report_step_min": _getf(qs, "report_step_min", DEFAULT_SWMM_CONFIG["swmm"]["report_step_min"], 0.5, 240),
+            "node_mapping_text": node_mapping_text,
+            "node_mapping": _parse_node_mapping(node_mapping_text),
+        },
+    }
+    if config["capture"]["capture_mode"] not in {"complete", "limited"}:
+        config["capture"]["capture_mode"] = "complete"
+    return config
+
+
+def save_swmm_config(config):
+    SWMM_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SWMM_CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    return config
+
 # ── HTML ──────────────────────────────────────────────────────────────────────
 HTML = r"""<!DOCTYPE html>
 <html lang="es">
@@ -52,7 +179,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;
 
 /* ── Sidebar ── */
 #sidebar{
-  width:270px;min-width:270px;background:#161b22;
+  width:320px;min-width:320px;background:#161b22;
   padding:14px 12px;overflow-y:auto;
   display:flex;flex-direction:column;gap:10px;
   border-right:1px solid #30363d;
@@ -64,6 +191,13 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;
 .param label{font-size:12px;color:#c9d1d9;display:flex;justify-content:space-between}
 .param label strong{color:#79c0ff;min-width:36px;text-align:right}
 .param input[type=range]{width:100%;accent-color:#1f6feb;cursor:pointer}
+.param input[type=text], .param textarea, .param select{
+  width:100%;background:#0d1117;color:#c9d1d9;
+  border:1px solid #30363d;border-radius:4px;padding:5px 6px;
+  font-size:12px;
+}
+.param textarea{min-height:52px;resize:vertical;font-family:ui-monospace,Consolas,monospace}
+.param label input[type=checkbox]{margin-right:6px;vertical-align:middle;accent-color:#1f6feb}
 .param-note{font-size:10px;color:#8b949e;line-height:1.35}
 #hint{font-size:11px;color:#8b949e;min-height:14px}
 
@@ -165,6 +299,76 @@ canvas{display:block!important;width:100%!important;height:100%!important}
   </div>
   <div class="param-note">La escorrentia se calcula automaticamente como 100 menos la infiltracion.</div>
 
+  <div class="sub">Lluvia / evento</div>
+  <div class="param">
+    <label>Nombre escenario</label>
+    <input type="text" id="sl-scenario-name" value="tormenta-base">
+  </div>
+  <div class="param">
+    <label>Intensidad <strong id="v-rain-intensity">60 mm/h</strong></label>
+    <input type="range" id="sl-rain-intensity" min="0" max="250" step="1" value="60">
+  </div>
+  <div class="param">
+    <label>Duracion <strong id="v-rain-duration">30 min</strong></label>
+    <input type="range" id="sl-rain-duration" min="5" max="360" step="5" value="30">
+  </div>
+  <div class="param">
+    <label>Intervalo <strong id="v-rain-interval">5 min</strong></label>
+    <input type="range" id="sl-rain-interval" min="1" max="60" step="1" value="5">
+  </div>
+  <div class="param">
+    <label>Factor seguridad <strong id="v-rain-safety">1.0x</strong></label>
+    <input type="range" id="sl-rain-safety" min="0.5" max="3.0" step="0.1" value="1.0">
+  </div>
+
+  <div class="sub">Captura tragantes</div>
+  <div class="param">
+    <label><input type="checkbox" id="sl-cap-active" checked> Captura activa</label>
+  </div>
+  <div class="param">
+    <label>Modo captura</label>
+    <select id="sl-cap-mode">
+      <option value="complete" selected>Completa</option>
+      <option value="limited">Limitada por capacidad</option>
+    </select>
+  </div>
+  <div class="param">
+    <label>Capacidad nominal <strong id="v-capacity">100 L/s</strong></label>
+    <input type="range" id="sl-capacity" min="0" max="1000" step="10" value="100">
+  </div>
+  <div class="param">
+    <label>Eficiencia <strong id="v-efficiency">100%</strong></label>
+    <input type="range" id="sl-efficiency" min="0" max="100" step="1" value="100">
+  </div>
+  <div class="param">
+    <label>Obstruccion <strong id="v-obstruction">0%</strong></label>
+    <input type="range" id="sl-obstruction" min="0" max="100" step="1" value="0">
+  </div>
+  <div class="param">
+    <label>Almacenamiento superf. <strong id="v-storage">0 m3</strong></label>
+    <input type="range" id="sl-storage" min="0" max="500" step="5" value="0">
+  </div>
+  <div class="param">
+    <label><input type="checkbox" id="sl-allow-bypass" checked> Permitir bypass superficial</label>
+  </div>
+
+  <div class="sub">SWMM / PySWMM</div>
+  <div class="param">
+    <label>Modelo INP</label>
+    <input type="text" id="sl-inp-path" value="models/cariari_base.inp">
+  </div>
+  <div class="param">
+    <label>Paso reporte <strong id="v-report-step">5 min</strong></label>
+    <input type="range" id="sl-report-step" min="1" max="60" step="1" value="5">
+  </div>
+  <div class="param">
+    <label>Mapeo tragante:nodo</label>
+    <textarea id="sl-node-mapping">T1:T1
+T2:T2</textarea>
+  </div>
+  <button class="btn" id="btn-save-swmm" type="button">Guardar valores lluvia/SWMM</button>
+  <div class="param-note">Estos valores se guardan en results/swmm/ui_scenario.json y quedan listos para correr la simulacion.</div>
+
   <div class="sub">Visual</div>
   <div class="param">
     <label>Vista base</label>
@@ -218,6 +422,7 @@ canvas{display:block!important;width:100%!important;height:100%!important}
 </script>
 <script>
 const _PATCH = {PATCH_JSON};
+const _SWMM_CONFIG = {SWMM_CONFIG_JSON};
 </script>
 <script>
 // ── Gaussian blur (1-D separable) ─────────────────────────────────────────
@@ -520,7 +725,12 @@ function buildBuildings(p, heights, opts, hMid, exag){
 }
 
 // ── UI ────────────────────────────────────────────────────────────────────
-const sliders=['sl-sd','sl-sw','sl-sr','sl-rd','sl-rw','sl-ct','sl-ex','sl-rs'];
+const sliders=[
+  'sl-sd','sl-sw','sl-sr','sl-rd','sl-rw',
+  'sl-rain-intensity','sl-rain-duration','sl-rain-interval','sl-rain-safety',
+  'sl-capacity','sl-efficiency','sl-obstruction','sl-storage','sl-report-step',
+  'sl-ct','sl-ex','sl-rs'
+];
 const infiltrationSliders=['sl-inf-base','sl-inf-veg','sl-inf-bld','sl-inf-street'];
 
 function getVals(){
@@ -542,6 +752,21 @@ function getVals(){
     infVeg:parseFloat(document.getElementById('sl-inf-veg').value),
     infBld:parseFloat(document.getElementById('sl-inf-bld').value),
     infStreet:parseFloat(document.getElementById('sl-inf-street').value),
+    scenarioName:document.getElementById('sl-scenario-name').value || 'tormenta-base',
+    rainIntensity:parseFloat(document.getElementById('sl-rain-intensity').value),
+    rainDuration:parseFloat(document.getElementById('sl-rain-duration').value),
+    rainInterval:parseFloat(document.getElementById('sl-rain-interval').value),
+    rainSafety:parseFloat(document.getElementById('sl-rain-safety').value),
+    capActive:document.getElementById('sl-cap-active').checked,
+    capMode:document.getElementById('sl-cap-mode').value || 'complete',
+    capacityLs:parseFloat(document.getElementById('sl-capacity').value),
+    efficiencyPct:parseFloat(document.getElementById('sl-efficiency').value),
+    obstructionPct:parseFloat(document.getElementById('sl-obstruction').value),
+    storageM3:parseFloat(document.getElementById('sl-storage').value),
+    allowBypass:document.getElementById('sl-allow-bypass').checked,
+    inpPath:document.getElementById('sl-inp-path').value || 'models/cariari_base.inp',
+    reportStep:parseFloat(document.getElementById('sl-report-step').value),
+    nodeMapping:document.getElementById('sl-node-mapping').value || '',
   };
 }
 function setControlValue(id,value){
@@ -563,6 +788,31 @@ function applyPatchSettings(settings){
   setControlValue('sl-inf-bld',inf.building ?? (ro.building===undefined ? undefined : 100-ro.building));
   setControlValue('sl-inf-street',inf.street ?? (ro.street===undefined ? undefined : 100-ro.street));
 }
+function setChecked(id,value){
+  const el=document.getElementById(id);
+  if(el && value!==undefined && value!==null) el.checked=!!value;
+}
+function applySwmmConfig(config){
+  if(!config) return;
+  const rain=config.rainfall || {};
+  const cap=config.capture || {};
+  const swmm=config.swmm || {};
+  setControlValue('sl-scenario-name',rain.scenario_name);
+  setControlValue('sl-rain-intensity',rain.intensity_mm_h);
+  setControlValue('sl-rain-duration',rain.duration_min);
+  setControlValue('sl-rain-interval',rain.interval_min);
+  setControlValue('sl-rain-safety',rain.safety_factor);
+  setChecked('sl-cap-active',cap.active);
+  setControlValue('sl-cap-mode',cap.capture_mode);
+  setControlValue('sl-capacity',cap.nominal_capacity_l_s);
+  setControlValue('sl-efficiency',cap.capture_efficiency===undefined ? undefined : cap.capture_efficiency*100);
+  setControlValue('sl-obstruction',cap.obstruction_pct);
+  setControlValue('sl-storage',cap.surface_storage_m3);
+  setChecked('sl-allow-bypass',cap.allow_bypass);
+  setControlValue('sl-inp-path',swmm.inp_path);
+  setControlValue('sl-report-step',swmm.report_step_min);
+  setControlValue('sl-node-mapping',swmm.node_mapping_text);
+}
 function syncLabels(){
   const v=getVals();
   document.getElementById('v-sd').textContent=v.sd.toFixed(1)+' m';
@@ -577,6 +827,15 @@ function syncLabels(){
   document.getElementById('v-inf-veg').textContent=v.infVeg.toFixed(0)+'%';
   document.getElementById('v-inf-bld').textContent=v.infBld.toFixed(0)+'%';
   document.getElementById('v-inf-street').textContent=v.infStreet.toFixed(0)+'%';
+  document.getElementById('v-rain-intensity').textContent=v.rainIntensity.toFixed(0)+' mm/h';
+  document.getElementById('v-rain-duration').textContent=v.rainDuration.toFixed(0)+' min';
+  document.getElementById('v-rain-interval').textContent=v.rainInterval.toFixed(0)+' min';
+  document.getElementById('v-rain-safety').textContent=v.rainSafety.toFixed(1)+'x';
+  document.getElementById('v-capacity').textContent=v.capacityLs.toFixed(0)+' L/s';
+  document.getElementById('v-efficiency').textContent=v.efficiencyPct.toFixed(0)+'%';
+  document.getElementById('v-obstruction').textContent=v.obstructionPct.toFixed(0)+'%';
+  document.getElementById('v-storage').textContent=v.storageM3.toFixed(0)+' m3';
+  document.getElementById('v-report-step').textContent=v.reportStep.toFixed(0)+' min';
 }
 function redraw(){
   if(!window._patch) return;
@@ -600,6 +859,15 @@ infiltrationSliders.forEach(id=>{
 ['sl-pal','sl-scol','sl-rcol','sl-bcol','sl-bld'].forEach(id=>{
   document.getElementById(id).addEventListener('change',redraw);
 });
+[
+  'sl-scenario-name','sl-cap-active','sl-cap-mode','sl-allow-bypass',
+  'sl-inp-path','sl-node-mapping'
+].forEach(id=>{
+  const el=document.getElementById(id);
+  if(!el) return;
+  el.addEventListener('input',syncLabels);
+  el.addEventListener('change',syncLabels);
+});
 document.getElementById('sl-scol').addEventListener('input',redraw);
 document.getElementById('sl-rcol').addEventListener('input',redraw);
 document.getElementById('sl-bcol').addEventListener('input',redraw);
@@ -607,6 +875,7 @@ document.getElementById('btn-update').addEventListener('click',redraw);
 
 // ── Aplicar al mapa principal ───────────────────────────────────────────────
 const btnRun=document.getElementById('btn-run');
+const btnSaveSwmm=document.getElementById('btn-save-swmm');
 const spinner=document.getElementById('spinner');
 const logEl=document.getElementById('log');
 
@@ -617,6 +886,44 @@ function appendLog(txt,cls){
   logEl.appendChild(d);
   logEl.scrollTop=logEl.scrollHeight;
 }
+
+function addScenarioParams(params,v){
+  params.set('scenario_name',v.scenarioName);
+  params.set('rain_intensity_mm_h',v.rainIntensity.toFixed(0));
+  params.set('rain_duration_min',v.rainDuration.toFixed(0));
+  params.set('rain_interval_min',v.rainInterval.toFixed(0));
+  params.set('rain_safety_factor',v.rainSafety.toFixed(1));
+  params.set('capture_active',v.capActive ? '1' : '0');
+  params.set('capture_mode',v.capMode);
+  params.set('nominal_capacity_l_s',v.capacityLs.toFixed(0));
+  params.set('capture_efficiency',(v.efficiencyPct/100).toFixed(2));
+  params.set('obstruction_pct',v.obstructionPct.toFixed(0));
+  params.set('surface_storage_m3',v.storageM3.toFixed(0));
+  params.set('allow_bypass',v.allowBypass ? '1' : '0');
+  params.set('inp_path',v.inpPath);
+  params.set('report_step_min',v.reportStep.toFixed(0));
+  params.set('node_mapping',v.nodeMapping);
+  return params;
+}
+
+function saveSwmmConfig(){
+  const v=getVals();
+  const params=addScenarioParams(new URLSearchParams(),v);
+  logEl.classList.add('on');
+  return fetch('/swmm-config?'+params.toString(), {cache:'no-store'})
+    .then(r=>r.json())
+    .then(data=>{
+      if(!data.ok) throw new Error(data.error || 'No se pudo guardar');
+      appendLog('Valores lluvia/SWMM guardados en '+data.path,'ok');
+      return data;
+    })
+    .catch(err=>{
+      appendLog('ERROR: '+err.message,'er');
+      throw err;
+    });
+}
+
+btnSaveSwmm.addEventListener('click',()=>{ saveSwmmConfig(); });
 
 btnRun.addEventListener('click',()=>{
   const v=getVals();
@@ -631,6 +938,7 @@ btnRun.addEventListener('click',()=>{
     infiltration_building_pct:v.infBld.toFixed(0),
     infiltration_street_pct:v.infStreet.toFixed(0),
   });
+  addScenarioParams(params,v);
   const url='/run?'+params.toString();
 
   btnRun.disabled=true;
@@ -638,6 +946,7 @@ btnRun.addEventListener('click',()=>{
   logEl.innerHTML='';
   logEl.classList.add('on');
   appendLog(`> python generar_dem_3d_threejs_satelital.py --street-depth ${v.sd.toFixed(1)} --street-width ${v.sw.toFixed(1)} --street-ramp ${v.sr.toFixed(1)} --river-depth ${v.rd.toFixed(1)} --river-width ${v.rw.toFixed(1)} --infiltration-base-pct ${v.infBase.toFixed(0)} --infiltration-vegetation-pct ${v.infVeg.toFixed(0)} --infiltration-building-pct ${v.infBld.toFixed(0)} --infiltration-street-pct ${v.infStreet.toFixed(0)}`);
+  appendLog(`> guardando escenario lluvia/SWMM: ${v.rainIntensity.toFixed(0)} mm/h, ${v.rainDuration.toFixed(0)} min, INP ${v.inpPath}`);
 
   const es=new EventSource(url);
   es.onmessage=e=>{
@@ -670,6 +979,7 @@ btnRun.addEventListener('click',()=>{
 // ── Init ──────────────────────────────────────────────────────────────────
 initThree();
 const p=_PATCH;
+applySwmmConfig(_SWMM_CONFIG);
 if(!p){
   syncLabels();
   noData.style.display='flex';
@@ -717,7 +1027,8 @@ class Handler(BaseHTTPRequestHandler):
             Handler._patch_json = patch_json
             page = HTML.replace('{THREE_JS}', THREE_JS) \
                         .replace('{ORBIT_JS}', ORBIT_JS) \
-                        .replace('{PATCH_JSON}', patch_json)
+                        .replace('{PATCH_JSON}', patch_json) \
+                        .replace('{SWMM_CONFIG_JSON}', load_swmm_config_json())
             self._send(200, 'text/html; charset=utf-8', page.encode('utf-8'))
 
         elif parsed.path == '/mapa':
@@ -728,6 +1039,19 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 data = MAP_HTML.read_bytes()
                 self._send(200, 'text/html; charset=utf-8', data)
+
+        elif parsed.path == '/swmm-config':
+            qs = parse_qs(parsed.query)
+            try:
+                config = save_swmm_config(build_swmm_config_from_query(qs))
+                payload = json.dumps(
+                    {"ok": True, "path": str(SWMM_CONFIG_FILE.relative_to(BASE_DIR)), "config": config},
+                    ensure_ascii=False,
+                )
+                self._send(200, 'application/json; charset=utf-8', payload.encode('utf-8'))
+            except Exception as exc:
+                payload = json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+                self._send(500, 'application/json; charset=utf-8', payload.encode('utf-8'))
 
         elif parsed.path == '/run':
             qs = parse_qs(parsed.query)
@@ -742,6 +1066,7 @@ class Handler(BaseHTTPRequestHandler):
             inf_veg = getf('infiltration_vegetation_pct', 100.0 - getf('runoff_vegetation_pct', 10.0))
             inf_bld = getf('infiltration_building_pct', 100.0 - getf('runoff_building_pct', 98.0))
             inf_street = getf('infiltration_street_pct', 100.0 - getf('runoff_street_pct', 94.0))
+            save_swmm_config(build_swmm_config_from_query(qs))
 
             cmd = [sys.executable, str(SCRIPT),
                    '--street-depth', f'{sd:.1f}',
@@ -761,6 +1086,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
             try:
+                saved_msg = json.dumps(f"SWMM config guardada: {SWMM_CONFIG_FILE.relative_to(BASE_DIR)}")
+                self.wfile.write(f'data: {saved_msg}\n\n'.encode())
+                self.wfile.flush()
                 import os as _os
                 env = {**_os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONUTF8': '1'}
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
