@@ -1,0 +1,164 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - button "Capas" [ref=e4] [cursor=pointer]
+    - button "Parámetros" [ref=e5] [cursor=pointer]
+    - button "Red 2D" [ref=e6] [cursor=pointer]
+    - button "Leyenda" [ref=e7] [cursor=pointer]
+    - link "Ajustar excavación" [ref=e8] [cursor=pointer]:
+      - /url: ../ajustar-excavacion
+  - generic:
+    - heading "🏔 Cariari, Costa Rica" [level=2]
+    - generic: "Lat: 9.9729° | Lon: -84.1614°"
+    - generic: "Malla DEM: 1320×1320"
+    - generic: "Elev. mín: 870 m"
+    - generic: "Elev. máx: 1004 m"
+    - generic: "Ancho área: 2568 m"
+    - generic: "Alto área: 1903 m"
+    - generic: "Acum. máx flujo: 459678 celdas"
+    - generic: "Infiltración media: 0.23"
+    - generic: "Escorrentia media: 77%"
+    - generic: "Vegetación estimada: 1.7%"
+    - generic: "Nodos hidráulicos: 552"
+    - generic: "Entradas/salidas superficiales: 242"
+    - generic: "DEM rio: 0.9 m | ancho 4.0 m"
+    - generic: "DEM calles: 1.5 m | borde 7.0 m"
+    - generic: "Edificios 3D: 2838"
+    - generic: "Flechas visibles: 0"
+  - generic [ref=e9]:
+    - heading "Capas" [level=3] [ref=e10]
+    - link "Ajustar excavación" [ref=e11] [cursor=pointer]:
+      - /url: ../ajustar-excavacion
+    - generic [ref=e12]: Base
+    - generic [ref=e13] [cursor=pointer]:
+      - radio "Terreno simple" [checked] [ref=e14]
+      - text: Terreno simple
+    - generic [ref=e15] [cursor=pointer]:
+      - radio "Imagen satelital" [ref=e16]
+      - text: Imagen satelital
+    - generic [ref=e17] [cursor=pointer]:
+      - radio "Sin imagen base" [ref=e18]
+      - text: Sin imagen base
+    - generic [ref=e19]:
+      - generic [ref=e20]:
+        - text: "Opacidad terreno:"
+        - strong [ref=e21]: 100%
+      - 'slider "Opacidad terreno: 100%" [ref=e22]': "100"
+    - generic [ref=e23]: Presets
+    - generic [ref=e24]:
+      - button "Simple" [ref=e25] [cursor=pointer]
+      - button "Solo calles" [ref=e26] [cursor=pointer]
+      - button "Todo" [ref=e27] [cursor=pointer]
+      - button "Quitar todo" [ref=e28] [cursor=pointer]
+    - generic [ref=e29]: Contenido
+    - generic [ref=e30] [cursor=pointer]:
+      - checkbox "Calles (líneas)" [checked] [ref=e31]
+      - text: Calles (líneas)
+    - generic [ref=e32] [cursor=pointer]:
+      - checkbox "Color de calles" [checked] [ref=e33]
+      - text: Color de calles
+    - generic [ref=e34]:
+      - text: Color calles
+      - textbox [ref=e35] [cursor=pointer]: "#3a3530"
+    - generic [ref=e36]:
+      - generic [ref=e37]:
+        - text: "Opacidad calles:"
+        - strong [ref=e38]: 90%
+      - 'slider "Opacidad calles: 90%" [ref=e39]': "90"
+    - generic [ref=e40] [cursor=pointer]:
+      - checkbox "Edificios 3D" [checked] [ref=e41]
+      - text: Edificios 3D
+    - generic [ref=e42]:
+      - text: Paleta muros
+      - combobox [ref=e43]:
+        - option "Tierra" [selected]
+        - option "Costera"
+        - option "Bosque"
+        - option "Neutra"
+        - option "Color base"
+      - textbox [ref=e44] [cursor=pointer]: "#d6c39a"
+    - generic [ref=e45]:
+      - text: Paleta techos
+      - combobox [ref=e46]:
+        - option "Terracota" [selected]
+        - option "Mixta"
+        - option "Pizarra"
+        - option "Tropical"
+        - option "Arena"
+        - option "Color base"
+      - textbox [ref=e47] [cursor=pointer]: "#9b6b43"
+    - generic [ref=e48] [cursor=pointer]:
+      - checkbox "Nodos hidráulicos" [checked] [ref=e49]
+      - text: Nodos hidráulicos
+    - generic [ref=e50] [cursor=pointer]:
+      - checkbox "Ríos" [ref=e51]
+      - text: Ríos
+    - generic [ref=e52] [cursor=pointer]:
+      - checkbox "Curvas" [ref=e53]
+      - text: Curvas
+    - generic [ref=e54] [cursor=pointer]:
+      - checkbox "Catastro" [ref=e55]
+      - text: Catastro
+    - generic [ref=e56] [cursor=pointer]:
+      - checkbox "Vegetación IA" [ref=e57]
+      - text: Vegetación IA
+    - generic [ref=e58] [cursor=pointer]:
+      - checkbox "Infiltración" [ref=e59]
+      - text: Infiltración
+    - generic [ref=e60]:
+      - text: Color infiltración
+      - combobox [ref=e61]:
+        - option "Clases" [selected]
+        - option "Degradado"
+    - generic [ref=e62]: "Vegetación: RGB fallback (IA sin vegetación detectable (nvidia/segformer-b0-finetuned-ade-512-512))"
+    - generic [ref=e63]: La acumulación usa escorrentía = lluvia - infiltración.
+    - generic [ref=e64]: "Infiltracion asignada: suelo 22%, vegetacion 90%, edificios 2%, calles 6%"
+    - generic [ref=e65] [cursor=pointer]:
+      - checkbox "Acumulación" [ref=e66]
+      - text: Acumulación
+    - generic [ref=e67]:
+      - text: Color de acumulación
+      - textbox [ref=e68] [cursor=pointer]: "#ffe080"
+      - text: Debajo del inicio la capa queda transparente
+    - generic [ref=e69]:
+      - generic [ref=e70]:
+        - text: Inicio
+        - slider "Inicio" [ref=e71]: "18"
+      - generic [ref=e72]:
+        - text: Fin
+        - slider "Fin" [ref=e73]: "82"
+    - generic [ref=e74]: Visible entre 18% y 82%
+    - generic [ref=e75] [cursor=pointer]:
+      - checkbox "Flechas" [ref=e76]
+      - text: Flechas
+    - generic [ref=e77]:
+      - generic [ref=e78]:
+        - text: "Densidad de flechas:"
+        - strong [ref=e79]: Media
+      - 'slider "Densidad de flechas: Media Baja a alta densidad" [ref=e80]': "3"
+      - text: Baja a alta densidad
+    - generic [ref=e81] [cursor=pointer]:
+      - checkbox "Subcuencas por tragante" [ref=e82]
+      - text: Subcuencas por tragante
+    - generic [ref=e83]: Área que drena a cada tragante (D8 sobre el DEM excavado). Click en un tragante para resaltar la suya.
+    - generic [ref=e84] [cursor=pointer]:
+      - checkbox "Zonas verdes" [ref=e85]
+      - text: Zonas verdes
+    - generic [ref=e86] [cursor=pointer]:
+      - checkbox "Desfogues" [ref=e87]
+      - text: Desfogues
+    - generic [ref=e88] [cursor=pointer]:
+      - checkbox "Área de estudio" [ref=e89]
+      - text: Área de estudio
+    - generic [ref=e90] [cursor=pointer]:
+      - checkbox "Retícula" [ref=e91]
+      - text: Retícula
+  - generic [ref=e92]: "🖱 Arrastrar: Orbitar | Scroll: Zoom | Clic derecho: Desplazar"
+  - generic [ref=e93]: Redes Hidráulicas
+  - generic [ref=e94] [cursor=pointer]:
+    - checkbox "▮ Red Pluvial (CRP)" [checked] [ref=e95]
+    - generic [ref=e96]: ▮
+    - text: Red Pluvial (CRP)
+  - generic [ref=e97] [cursor=pointer]:
+    - checkbox "▮ Red Residual (CRN)" [checked] [ref=e98]
+    - generic [ref=e99]: ▮
+    - text: Red Residual (CRN)

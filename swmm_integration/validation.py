@@ -30,6 +30,21 @@ def _parse_sections(text: str) -> dict[str, list[str]]:
     return sections
 
 
+def read_inp_node_ids(inp_path: str | Path) -> set[str]:
+    """Ids de nodos declarados en el INP (para auto-mapear tragantes)."""
+    path = Path(inp_path)
+    if not path.exists():
+        return set()
+    sections = _parse_sections(path.read_text(encoding="utf-8", errors="replace"))
+    nodes: set[str] = set()
+    for section in ("JUNCTIONS", "OUTFALLS", "STORAGE", "DIVIDERS"):
+        for line in sections.get(section, []):
+            parts = line.split()
+            if parts:
+                nodes.add(parts[0])
+    return nodes
+
+
 def validate_inp_file(inp_path: str | Path) -> ValidationReport:
     path = Path(inp_path)
     issues: list[ValidationIssue] = []

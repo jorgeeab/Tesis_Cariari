@@ -58,6 +58,9 @@ class FakeNodes:
             raise KeyError(node_id)
         return self.nodes[node_id]
 
+    def __iter__(self):
+        return iter(self.nodes)
+
 
 class FakeLink:
     linkid = "C1"
@@ -121,8 +124,43 @@ def test_generated_inflow_is_sent_to_mapped_nodes(monkeypatch):
 
     assert FakeNode.calls == [("T1", 0.1), ("T1", 0.2), ("T1", 0.2)]
     assert result.node_results["T1"][-1].total_inflow_m3s == 0.2
+    assert result.node_results["J1"][-1].depth_m == 0.1
     assert result.link_results["C1"]
     assert result.summary["generated_inflow_strategy"] == "piecewise_constant_hold"
+
+
+class FakeSimulationOtherDate(FakeSimulation):
+    """La fecha de inicio del INP no coincide con el start_time del escenario."""
+
+    def __init__(self, _inp_path: str):
+        super().__init__(_inp_path)
+        self.start = datetime(2020, 6, 15)
+        self.current_time = self.start
+
+
+def test_minutes_are_relative_to_simulation_origin(monkeypatch):
+    FakeNode.calls = []
+    monkeypatch.setattr(
+        "swmm_integration.engine._load_pyswmm",
+        lambda: SimpleNamespace(
+            Simulation=FakeSimulationOtherDate, Nodes=FakeNodes, Links=FakeLinks
+        ),
+    )
+
+    SwmmSimulationService().run_simulation(
+        SwmmRunRequest(
+            inp_path="models/cariari_base.inp",
+            hydrographs={"sink-a": _hydrograph_points()},
+            node_mapping={"sink-a": "T1"},
+            start_time=datetime(2026, 7, 7),
+            duration_min=10,
+            report_step_min=5,
+        )
+    )
+
+    # Sin origen propio, el desfase de fechas dejaría el minuto clavado en 0
+    # y se inyectaría 0.1 todo el tiempo.
+    assert FakeNode.calls == [("T1", 0.1), ("T1", 0.2), ("T1", 0.2)]
 
 
 def test_missing_mapped_node_is_reported(monkeypatch):

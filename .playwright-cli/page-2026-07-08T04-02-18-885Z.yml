@@ -1,0 +1,170 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e4]:
+    - button "Capas" [ref=e5] [cursor=pointer]
+    - button "Parámetros" [ref=e6] [cursor=pointer]
+    - button "Leyenda" [ref=e7] [cursor=pointer]
+    - link "Ajustar excavación" [ref=e8] [cursor=pointer]:
+      - /url: ../ajustar-excavacion
+  - generic:
+    - heading "🏔 Cariari, Costa Rica" [level=2]
+    - generic: "Lat: 9.9729° | Lon: -84.1614°"
+    - generic: "Malla DEM: 1320×1320"
+    - generic: "Elev. mín: 825 m"
+    - generic: "Elev. máx: 1004 m"
+    - generic: "Ancho área: 2568 m"
+    - generic: "Alto área: 1903 m"
+    - generic: "Acum. máx flujo: 233530 celdas"
+    - generic: "Infiltración media: 0.23"
+    - generic: "Escorrentia media: 77%"
+    - generic: "Vegetación estimada: 1.7%"
+    - generic: "Nodos hidráulicos: 552"
+    - generic: "Entradas/salidas superficiales: 242"
+    - generic: "Edificios 3D: 2838"
+    - generic: "Flechas visibles: 812"
+  - generic [ref=e100]:
+    - heading "Parámetros" [level=3] [ref=e101]
+    - generic [ref=e102]: Terreno
+    - generic [ref=e103]:
+      - generic [ref=e104]:
+        - generic [ref=e105]:
+          - text: Prof. calles
+          - strong [ref=e106]: 1.5 m
+        - slider "Prof. calles 1.5 m" [ref=e107]: "1.5"
+      - generic [ref=e108]:
+        - generic [ref=e109]:
+          - text: Ancho calles
+          - strong [ref=e110]: 1.0x
+        - slider "Ancho calles 1.0x" [ref=e111]: "1"
+      - generic [ref=e112]:
+        - generic [ref=e113]:
+          - text: Borde calles
+          - strong [ref=e114]: 7.0 m
+        - slider "Borde calles 7.0 m" [ref=e115]: "7"
+      - generic [ref=e116]:
+        - generic [ref=e117]:
+          - text: Prof. río
+          - strong [ref=e118]: 3.5 m
+        - slider "Prof. río 3.5 m" [ref=e206]: "3.5"
+      - generic [ref=e120]:
+        - generic [ref=e121]:
+          - text: Ancho río
+          - strong [ref=e122]: 4.0 m
+        - slider "Ancho río 4.0 m" [ref=e123]: "4"
+      - button "Aplicar terreno" [ref=e124] [cursor=pointer]
+    - generic [ref=e125]: Superficie
+    - generic [ref=e126]:
+      - generic [ref=e127]:
+        - generic [ref=e128]:
+          - text: Suelo abierto
+          - strong [ref=e129]: 22%
+        - slider "Suelo abierto 22%" [ref=e130]: "22"
+      - generic [ref=e131]:
+        - generic [ref=e132]:
+          - text: Vegetación
+          - strong [ref=e133]: 90%
+        - slider "Vegetación 90%" [ref=e134]: "90"
+      - generic [ref=e135]:
+        - generic [ref=e136]:
+          - text: Edificios
+          - strong [ref=e137]: 2%
+        - slider "Edificios 2%" [ref=e138]: "2"
+      - generic [ref=e139]:
+        - generic [ref=e140]:
+          - text: Calles
+          - strong [ref=e141]: 6%
+        - slider "Calles 6%" [ref=e142]: "6"
+    - generic [ref=e143]: Lluvia
+    - generic [ref=e144]:
+      - generic [ref=e145]:
+        - generic [ref=e146]: Escenario
+        - textbox "Escenario" [ref=e147]: tormenta-base
+      - generic [ref=e148]:
+        - generic [ref=e149]:
+          - text: Intensidad
+          - strong [ref=e150]: 90 mm/h
+        - slider "Intensidad 90 mm/h" [ref=e207]: "90"
+      - generic [ref=e152]:
+        - generic [ref=e153]:
+          - text: Duración
+          - strong [ref=e154]: 30 min
+        - slider "Duración 30 min" [ref=e155]: "30"
+      - generic [ref=e156]:
+        - generic [ref=e157]:
+          - text: Intervalo
+          - strong [ref=e158]: 5 min
+        - slider "Intervalo 5 min" [ref=e159]: "5"
+      - generic [ref=e160]:
+        - generic [ref=e161]:
+          - text: Factor seguridad
+          - strong [ref=e162]: 1.0x
+        - slider "Factor seguridad 1.0x" [ref=e163]: "1"
+    - generic [ref=e164]: Tragantes
+    - generic [ref=e165]:
+      - generic [ref=e166]:
+        - checkbox "Captura activa" [checked] [ref=e167]
+        - text: Captura activa
+      - generic [ref=e168]:
+        - generic [ref=e169]: Modo captura
+        - combobox "Modo captura" [ref=e170]:
+          - option "Completa" [selected]
+          - option "Limitada"
+      - generic [ref=e171]:
+        - generic [ref=e172]:
+          - text: Capacidad
+          - strong [ref=e173]: 100 L/s
+        - slider "Capacidad 100 L/s" [ref=e174]: "100"
+      - generic [ref=e175]:
+        - generic [ref=e176]:
+          - text: Eficiencia
+          - strong [ref=e177]: 100%
+        - slider "Eficiencia 100%" [ref=e178]: "100"
+      - generic [ref=e179]:
+        - generic [ref=e180]:
+          - text: Obstrucción
+          - strong [ref=e181]: 0%
+        - slider "Obstrucción 0%" [ref=e182]: "0"
+      - generic [ref=e183]:
+        - generic [ref=e184]:
+          - text: Almacenamiento
+          - strong [ref=e185]: 0 m3
+        - slider "Almacenamiento 0 m3" [ref=e186]: "0"
+      - generic [ref=e187]:
+        - checkbox "Bypass superficial" [checked] [ref=e188]
+        - text: Bypass superficial
+    - generic [ref=e189]: SWMM
+    - generic [ref=e190]:
+      - generic [ref=e191]:
+        - generic [ref=e192]: Modelo INP
+        - textbox "Modelo INP" [ref=e193]: models/cariari_pluvial.inp
+      - generic [ref=e194]:
+        - generic [ref=e195]:
+          - text: Paso reporte
+          - strong [ref=e196]: 5 min
+        - slider "Paso reporte 5 min" [ref=e197]: "5"
+      - generic [ref=e198]:
+        - generic [ref=e199]: Mapeo tragante:nodo
+        - textbox "Mapeo tragante:nodo" [ref=e200]: T1:T1 T2:T2
+    - generic [ref=e201]:
+      - button "Guardar" [ref=e202] [cursor=pointer]
+      - button "Validar SWMM" [ref=e203] [cursor=pointer]
+    - button "🌧 Simular lluvia" [ref=e204] [cursor=pointer]
+    - generic [ref=e205]: "Simulación lista (solo hidrología superficial): stub"
+  - generic [ref=e92]: "🖱 Arrastrar: Orbitar | Scroll: Zoom | Clic derecho: Desplazar"
+  - generic [ref=e208]:
+    - button "⏸" [ref=e209] [cursor=pointer]
+    - slider [ref=e210]: "4.8325"
+    - generic [ref=e211]: 22:07 (+5 min)
+    - combobox "Velocidad de reproducción" [ref=e212]:
+      - option "1×"
+      - option "5×" [selected]
+      - option "15×"
+    - generic [ref=e213]: 🌧 0 mm/h
+  - generic [ref=e93]: Redes Hidráulicas
+  - generic [ref=e94] [cursor=pointer]:
+    - checkbox "▮ Red Pluvial (CRP)" [checked] [ref=e95]
+    - generic [ref=e96]: ▮
+    - text: Red Pluvial (CRP)
+  - generic [ref=e97] [cursor=pointer]:
+    - checkbox "▮ Red Residual (CRN)" [checked] [ref=e98]
+    - generic [ref=e99]: ▮
+    - text: Red Residual (CRN)

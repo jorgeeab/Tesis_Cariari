@@ -1,4 +1,10 @@
 {
+  "infiltration_pct": {
+    "base": 22.0,
+    "vegetation": 90.0,
+    "building": 2.0,
+    "street": 6.0
+  },
   "rainfall": {
     "scenario_name": "tormenta-base",
     "duration_min": 30.0,
@@ -16,12 +22,9 @@
     "allow_bypass": true
   },
   "swmm": {
-    "inp_path": "models/cariari_base.inp",
+    "inp_path": "models/cariari_pluvial.inp",
     "report_step_min": 5.0,
-    "node_mapping_text": "T1:T1\nT2:T2",
-    "node_mapping": {
-      "T1": "T1",
-      "T2": "T2"
-    }
+    "node_mapping_text": "",
+    "node_mapping": {}
   }
 }

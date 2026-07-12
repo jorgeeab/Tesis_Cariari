@@ -92,17 +92,26 @@ def _captured_flow(flow_m3s: float, capture: CaptureConfig) -> tuple[float, floa
     return captured, bypass
 
 
-def generate_hydrographs(request: HydrologyRunRequest) -> HydrographResult:
+def generate_hydrographs(
+    request: HydrologyRunRequest,
+    precomputed_tributaries: tuple[dict[str, list[int]], dict[int, DestinationKind]] | None = None,
+) -> HydrographResult:
     """Generate physical sink hydrographs from rainfall, D8 receivers and cover.
 
     The normalized accumulation layer remains visual only. This function uses
     physical volume per cell:
         V_rain = (P_mm / 1000) * cell_area_m2
         V_runoff = V_rain * (1 - infiltration_fraction)
+
+    precomputed_tributaries allows reusing a cached assign_tributary_cells
+    result for large grids; it must correspond to the same surface grid.
     """
     grid = request.surface
     intervals = build_rainfall_intervals(request.rainfall)
-    tributaries, destinations = assign_tributary_cells(grid)
+    if precomputed_tributaries is not None:
+        tributaries, destinations = precomputed_tributaries
+    else:
+        tributaries, destinations = assign_tributary_cells(grid)
 
     hydrographs: dict[str, list[HydrographPoint]] = {}
     tributary_areas: list[TributaryArea] = []

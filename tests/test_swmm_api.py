@@ -35,6 +35,50 @@ def _hydrology_body() -> dict:
     }
 
 
+def test_excavation_tuner_uses_same_application():
+    response = client.get("/ajustar-excavacion")
+
+    assert response.status_code == 200
+    assert "/api/excavation/run" in response.text
+    assert "/resultados_refinados/Refinado_30_ThreeJS_Cortina_Ajustada.html" in response.text
+    assert "localhost:8765" not in response.text
+
+
+def test_excavation_run_streams_generator_output(monkeypatch):
+    class FakeProcess:
+        stdout = iter(["Preparando DEM\n", "HTML generado\n"])
+
+        def wait(self):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(app_module.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(
+        app_module,
+        "_read_map_terrain_params",
+        lambda: {
+            "street_depth": 1.8,
+            "street_width": 1.0,
+            "street_ramp": 7.0,
+            "river_depth": 2.5,
+            "river_width": 5.0,
+        },
+    )
+
+    response = client.get(
+        "/api/excavation/run",
+        params={"street_depth": 1.8, "river_width": 5.0},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "Preparando DEM" in response.text
+    assert "VERIFICADO: mapa principal actualizado" in response.text
+    assert "data: __done__" in response.text
+
+
 def test_create_scenario_and_run_hydrology():
     app_module.SCENARIOS.clear()
     app_module.HYDROLOGY_RESULTS.clear()
@@ -56,6 +100,29 @@ def test_validate_swmm_endpoint_accepts_base_model():
 
     assert response.status_code == 200
     assert response.json()["valid"] is True
+
+
+def test_ui_scenario_endpoint_saves_normalized_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "UI_SCENARIO_PATH", tmp_path / "ui_scenario.json")
+
+    response = client.post(
+        "/api/ui/scenario",
+        json={
+            "infiltration_pct": {"base": 33, "vegetation": 88, "building": 4, "street": 7},
+            "rainfall": {"scenario_name": "principal", "intensity_mm_h": 80, "duration_min": 40},
+            "capture": {"capture_mode": "limited", "capture_efficiency": 0.75},
+            "swmm": {"inp_path": "models/cariari_base.inp", "node_mapping_text": "T1:T1"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["config"]["infiltration_pct"]["base"] == 33
+    assert body["config"]["rainfall"]["scenario_name"] == "principal"
+    assert body["config"]["capture"]["capture_efficiency"] == 0.75
+    assert body["config"]["swmm"]["node_mapping"] == {"T1": "T1"}
+    assert client.get("/api/ui/scenario").json()["infiltration_pct"]["vegetation"] == 88
 
 
 def test_run_swmm_uses_stored_hydrology_and_returns_result(monkeypatch):

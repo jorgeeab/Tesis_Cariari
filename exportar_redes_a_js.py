@@ -184,18 +184,31 @@ def main():
                 + html[insert_at:])
 
     # ── Panel de capas ────────────────────────────────────────────────────────
+    # El bloque debe quedar DENTRO de #layer-panel (si queda tras </script>,
+    # como lo emite la plantilla del generador, los checkboxes no se ven).
+    # Estrategia: eliminar todo bloque existente y re-insertar en el ancla.
     MARKER_PANEL_END = "<!-- /RED_HIDRAULICA_SEPARADA_PANEL -->"
     panel_html = _build_panel_html()
-    if MARKER_PANEL in html:
+    while MARKER_PANEL in html:
         start = html.find(MARKER_PANEL)
-        end   = html.find(MARKER_PANEL_END, start) + len(MARKER_PANEL_END)
-        html  = html[:start] + MARKER_PANEL + "\n" + panel_html + "\n  " + MARKER_PANEL_END + html[end:]
-    else:
-        anchor = '<label class="layer-row"><input id="toggle-hydraulic-links"'
+        end   = html.find(MARKER_PANEL_END, start)
+        end   = end + len(MARKER_PANEL_END) if end >= 0 else start + len(MARKER_PANEL)
+        html  = html[:start] + html[end:]
+    panel_block = f"{MARKER_PANEL}\n{panel_html}\n  {MARKER_PANEL_END}"
+    for anchor in ('<label class="layer-row"><input id="toggle-hydraulic-nodes"',
+                   '<label class="layer-row"><input id="toggle-hydraulic-links"'):
         idx = html.find(anchor)
         if idx >= 0:
             end_label = html.find("</label>", idx) + len("</label>")
-            html = html[:end_label] + f"\n  {MARKER_PANEL}\n{panel_html}\n  {MARKER_PANEL_END}" + html[end_label:]
+            html = html[:end_label] + f"\n  {panel_block}" + html[end_label:]
+            break
+    else:
+        idx = html.find('<div id="layer-panel">')
+        if idx >= 0:
+            end_tag = html.find(">", idx) + 1
+            html = html[:end_tag] + f"\n  {panel_block}" + html[end_tag:]
+        else:
+            print("  AVISO: no se encontro ancla para el panel de redes")
 
     # ── Leyenda ───────────────────────────────────────────────────────────────
     MARKER_LEGEND_END = "<!-- /RED_HIDRAULICA_SEPARADA_LEGEND -->"
@@ -231,24 +244,35 @@ def main():
 def _build_layers_js():
     return """
 // ── Redes Hidráulicas Separadas ───────────────────────────────────────────────
-const pluvialLinkLayer  = new THREE.Group();
-const residualLinkLayer = new THREE.Group();
+const pluvialLinkLayer   = new THREE.Group();
+const residualLinkLayer  = new THREE.Group();
+const pluvialArrowLayer  = new THREE.Group();
+const residualArrowLayer = new THREE.Group();
 scene.add(pluvialLinkLayer);
 scene.add(residualLinkLayer);
+scene.add(pluvialArrowLayer);
+scene.add(residualArrowLayer);
 
-function buildRedPluvialLinks() {
-  clearGroup(pluvialLinkLayer);
-  if (!RED_PLUVIAL_LINKS || !RED_PLUVIAL_LINKS.length) return;
+const redesState = { pluvial: true, residual: true, arrows: true };
+const REDES_ARROW_SPACING_M = 45;   // separacion entre flechas a lo largo del tramo
+const REDES_ARROW_MIN_LEN_M = 8;    // tramos mas cortos no reciben flecha
+
+function _redesLinkPoints(link, burial) {
+  const buried = link.buried_points || link.points;
+  return link.points.map((p, idx) => {
+    const b = buried[idx] || p;
+    return new THREE.Vector3(p[0], lerp(p[1], b[1], burial), p[2]);
+  });
+}
+
+function _buildRedTubes(targetLayer, linksData, colorHex, burial) {
+  clearGroup(targetLayer);
+  if (!linksData || !linksData.length) return;
   const radius = 1.2;
-  const col = new THREE.Color(0x29b6f6);
-  const burial = typeof viewerState !== 'undefined' ? clamp(viewerState.hydraulicLinkBurial, 0, 1) : 0.0;
-  for (const link of RED_PLUVIAL_LINKS) {
+  const col = new THREE.Color(colorHex);
+  for (const link of linksData) {
     if (!link.points || link.points.length < 2) continue;
-    const buried = link.buried_points || link.points;
-    const pts = link.points.map((p, idx) => {
-      const b = buried[idx] || p;
-      return new THREE.Vector3(p[0], lerp(p[1], b[1], burial), p[2]);
-    });
+    const pts = _redesLinkPoints(link, burial);
     const curve = new THREE.CurvePath();
     for (let i = 1; i < pts.length; i++) curve.add(new THREE.LineCurve3(pts[i-1], pts[i]));
     const geo = new THREE.TubeGeometry(curve, Math.max(pts.length*6, 16), radius, 6, false);
@@ -258,34 +282,72 @@ function buildRedPluvialLinks() {
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.renderOrder = 6;
-    pluvialLinkLayer.add(mesh);
+    targetLayer.add(mesh);
   }
 }
 
-function buildRedResidualLinks() {
-  clearGroup(residualLinkLayer);
-  if (!RED_RESIDUAL_LINKS || !RED_RESIDUAL_LINKS.length) return;
-  const radius = 1.2;
-  const col = new THREE.Color(0xff7043);
-  const burial = typeof viewerState !== 'undefined' ? clamp(viewerState.hydraulicLinkBurial, 0, 1) : 0.0;
-  for (const link of RED_RESIDUAL_LINKS) {
+// Flechas de sentido de flujo: conos instanciados orientados src -> dst
+// (los tramos ya vienen orientados por gravedad: src = cota alta, dst = cota baja)
+function _buildRedArrows(targetLayer, linksData, colorHex, burial) {
+  clearGroup(targetLayer);
+  if (!linksData || !linksData.length) return;
+  const transforms = [];
+  for (const link of linksData) {
     if (!link.points || link.points.length < 2) continue;
-    const buried = link.buried_points || link.points;
-    const pts = link.points.map((p, idx) => {
-      const b = buried[idx] || p;
-      return new THREE.Vector3(p[0], lerp(p[1], b[1], burial), p[2]);
-    });
-    const curve = new THREE.CurvePath();
-    for (let i = 1; i < pts.length; i++) curve.add(new THREE.LineCurve3(pts[i-1], pts[i]));
-    const geo = new THREE.TubeGeometry(curve, Math.max(pts.length*6, 16), radius, 6, false);
-    const mat = new THREE.MeshStandardMaterial({
-      color: col, emissive: col, emissiveIntensity: 0.25,
-      roughness: 0.5, metalness: 0.1, transparent: true, opacity: 0.90,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.renderOrder = 6;
-    residualLinkLayer.add(mesh);
+    const pts = _redesLinkPoints(link, burial);
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
+    const L = cum[cum.length - 1];
+    if (L < REDES_ARROW_MIN_LEN_M) continue;
+    const nArrows = Math.max(1, Math.floor(L / REDES_ARROW_SPACING_M));
+    for (let k = 0; k < nArrows; k++) {
+      const dTarget = (k + 0.5) * (L / nArrows);
+      let i = 1;
+      while (i < cum.length - 1 && cum[i] < dTarget) i++;
+      const segLen = Math.max(cum[i] - cum[i - 1], 1e-6);
+      const t = (dTarget - cum[i - 1]) / segLen;
+      const pos = new THREE.Vector3().lerpVectors(pts[i - 1], pts[i], t);
+      const dir = new THREE.Vector3().subVectors(pts[i], pts[i - 1]).normalize();
+      transforms.push([pos, dir]);
+    }
   }
+  if (!transforms.length) return;
+  const geo  = new THREE.ConeGeometry(2.6, 7.0, 8);
+  const mat  = new THREE.MeshBasicMaterial({ color: colorHex, transparent: true, opacity: 0.95 });
+  const inst = new THREE.InstancedMesh(geo, mat, transforms.length);
+  const up = new THREE.Vector3(0, 1, 0);
+  const q  = new THREE.Quaternion();
+  const m  = new THREE.Matrix4();
+  const s  = new THREE.Vector3(1, 1, 1);
+  transforms.forEach(([pos, dir], i) => {
+    q.setFromUnitVectors(up, dir);
+    m.compose(pos, q, s);
+    inst.setMatrixAt(i, m);
+  });
+  inst.instanceMatrix.needsUpdate = true;
+  inst.renderOrder = 7;
+  targetLayer.add(inst);
+}
+
+function updateRedesVisibility() {
+  pluvialLinkLayer.visible   = redesState.pluvial;
+  residualLinkLayer.visible  = redesState.residual;
+  pluvialArrowLayer.visible  = redesState.pluvial  && redesState.arrows;
+  residualArrowLayer.visible = redesState.residual && redesState.arrows;
+}
+
+function buildRedPluvialLinks() {
+  const burial = typeof viewerState !== 'undefined' ? clamp(viewerState.hydraulicLinkBurial, 0, 1) : 0.0;
+  _buildRedTubes(pluvialLinkLayer, RED_PLUVIAL_LINKS, 0x29b6f6, burial);
+  _buildRedArrows(pluvialArrowLayer, RED_PLUVIAL_LINKS, 0x81d4fa, burial);
+  updateRedesVisibility();
+}
+
+function buildRedResidualLinks() {
+  const burial = typeof viewerState !== 'undefined' ? clamp(viewerState.hydraulicLinkBurial, 0, 1) : 0.0;
+  _buildRedTubes(residualLinkLayer, RED_RESIDUAL_LINKS, 0xff7043, burial);
+  _buildRedArrows(residualArrowLayer, RED_RESIDUAL_LINKS, 0xffab91, burial);
+  updateRedesVisibility();
 }
 """
 
@@ -296,18 +358,32 @@ def _build_events_js():
 buildRedPluvialLinks();
 buildRedResidualLinks();
 
-document.getElementById('toggle-red-pluvial-links')?.addEventListener('change', e => {
-  pluvialLinkLayer.visible = e.target.checked;
-});
-document.getElementById('toggle-red-residual-links')?.addEventListener('change', e => {
-  residualLinkLayer.visible = e.target.checked;
-});
-
-// Reactivar reconstrucción al mover el control de entierro (burial slider)
-document.getElementById('hydraulic-link-burial')?.addEventListener('input', () => {
-  buildRedPluvialLinks();
-  buildRedResidualLinks();
-});
+// Los checkboxes pueden estar despues de este script en el documento:
+// enganchar listeners solo cuando el DOM este completo.
+function wireRedesUI() {
+  document.getElementById('toggle-red-pluvial-links')?.addEventListener('change', e => {
+    redesState.pluvial = e.target.checked;
+    updateRedesVisibility();
+  });
+  document.getElementById('toggle-red-residual-links')?.addEventListener('change', e => {
+    redesState.residual = e.target.checked;
+    updateRedesVisibility();
+  });
+  document.getElementById('toggle-red-flow-arrows')?.addEventListener('change', e => {
+    redesState.arrows = e.target.checked;
+    updateRedesVisibility();
+  });
+  // Reactivar reconstrucción al mover el control de entierro (burial slider)
+  document.getElementById('hydraulic-link-burial')?.addEventListener('input', () => {
+    buildRedPluvialLinks();
+    buildRedResidualLinks();
+  });
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', wireRedesUI);
+} else {
+  wireRedesUI();
+}
 """
 
 
@@ -316,12 +392,15 @@ def _build_panel_html():
   <label class="layer-row"><input id="toggle-red-pluvial-links" type="checkbox" checked>
     <span style="color:#29b6f6">&#9646;</span> Red Pluvial (CRP)</label>
   <label class="layer-row"><input id="toggle-red-residual-links" type="checkbox" checked>
-    <span style="color:#ff7043">&#9646;</span> Red Residual (CRN)</label>"""
+    <span style="color:#ff7043">&#9646;</span> Red Residual (CRN)</label>
+  <label class="layer-row"><input id="toggle-red-flow-arrows" type="checkbox" checked>
+    <span style="color:#b3e5fc">&#10148;</span> Flechas de flujo</label>"""
 
 
 def _build_legend_html():
     return """  <div class="leg-item"><span class="leg-swatch" style="background:#29b6f6"></span>Red Pluvial (CRP)</div>
-  <div class="leg-item"><span class="leg-swatch" style="background:#ff7043"></span>Red Residual (CRN)</div>"""
+  <div class="leg-item"><span class="leg-swatch" style="background:#ff7043"></span>Red Residual (CRN)</div>
+  <div class="leg-item"><span style="color:#b3e5fc">&#10148;</span>&nbsp;Sentido del flujo (gravedad)</div>"""
 
 
 if __name__ == "__main__":

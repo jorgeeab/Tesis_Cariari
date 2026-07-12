@@ -37,6 +37,10 @@ import zlib
 
 import numpy as np
 
+from swmm_integration.ui_config import load_ui_scenario
+
+BASE_DIR = Path(__file__).resolve().parent
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
@@ -46,7 +50,7 @@ if hasattr(sys.stderr, "reconfigure"):
 #  CONFIGURACIÓN
 # ─────────────────────────────────────────────────────────────
 GRID_RESOLUTION    = 220        # resolución de la malla DEM (NxN)
-FLOW_RESOLUTION_SCALE = 3       # multiplicador para hidrología fina (3 → 660×660)
+FLOW_RESOLUTION_SCALE = 6       # multiplicador para hidrología fina (6 → 1320×1320)
 IDW_POWER          = 1.4        # potencia de la IDW
 IDW_NEIGHBORS      = 20         # vecinos para IDW
 SMOOTH_PASSES      = 1          # pasadas de suavizado 3×3
@@ -59,6 +63,7 @@ MARGIN_DEG         = 0.003      # margen en grados para el bounding box
 TILE_RETRY         = 3          # reintentos de descarga de tiles
 FLOW_FILL_EPS      = 0.02       # leve incremento para resolver depresiones/planicies
 FLOW_SMOOTH_PASSES = 5          # suavizado de la capa de acumulacion
+INLET_INFLUENCE_RADIUS_M = 6.0  # area local donde cada tragante atrae el flujo D8
 STRUCTURE_DEM_WEIGHT = 6        # peso de cotas puntuales hidraulicas sobre curvas para el DEM final
 STRUCTURE_SURFACE_TOL = 4.0     # diferencia maxima admisible contra el DEM preliminar
 STRUCTURE_MIN_ELEV  = 900.0
@@ -1229,7 +1234,11 @@ def detect_vegetation_ai_mask(tex_bytes, target_nx, target_ny):
 
     model_name = os.getenv("VEGETATION_AI_MODEL", "nvidia/segformer-b0-finetuned-ade-512-512")
     try:
-        from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
+        try:
+            from transformers import AutoImageProcessor
+        except Exception:
+            from transformers import SegformerFeatureExtractor as AutoImageProcessor
+        from transformers import SegformerForSemanticSegmentation
         import torch
     except Exception as exc:
         return None, f"IA no disponible ({type(exc).__name__})"
@@ -1239,12 +1248,23 @@ def detect_vegetation_ai_mask(tex_bytes, target_nx, target_ny):
         img_model = img.copy()
         img_model.thumbnail((1024, 1024), _pil_resample_filter())
 
-        extractor = SegformerFeatureExtractor.from_pretrained(model_name)
+        extractor = AutoImageProcessor.from_pretrained(model_name)
         model = SegformerForSemanticSegmentation.from_pretrained(model_name)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model.to(device).eval()
 
-        inputs = extractor(images=img_model, return_tensors="pt")
+        try:
+            inputs = extractor(images=img_model, return_tensors="pt", padding=True)
+        except ValueError:
+            size = getattr(extractor, "size", {}) or {}
+            height = int(size.get("height", 512) if isinstance(size, dict) else 512)
+            width = int(size.get("width", 512) if isinstance(size, dict) else 512)
+            img_resized = img_model.resize((width, height), _pil_resample_filter())
+            pixels = torch.tensor(list(img_resized.getdata()), dtype=torch.float32, device=device)
+            pixels = pixels.view(height, width, 3).permute(2, 0, 1).unsqueeze(0) / 255.0
+            mean = torch.tensor(getattr(extractor, "image_mean", [0.485, 0.456, 0.406]), dtype=torch.float32, device=device).view(1, 3, 1, 1)
+            std = torch.tensor(getattr(extractor, "image_std", [0.229, 0.224, 0.225]), dtype=torch.float32, device=device).view(1, 3, 1, 1)
+            inputs = {"pixel_values": (pixels - mean) / std}
         inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
             logits = model(**inputs).logits
@@ -1267,6 +1287,8 @@ def detect_vegetation_ai_mask(tex_bytes, target_nx, target_ny):
 
         mask = np.isin(pred_np, vegetation_ids).astype(np.float32)
         mask = _resize_unit_array(mask, target_nx, target_ny)
+        if float(mask.mean()) < 0.001:
+            return None, f"IA sin vegetación detectable ({model_name})"
         return mask, f"IA SegFormer ADE20K ({model_name})"
     except Exception as exc:
         return None, f"falló IA ({type(exc).__name__}: {exc})"
@@ -2560,6 +2582,8 @@ def hydraulic_links_to_threejs(links, lon_center, lat_center, dem, lons, lats):
         if len(pts) >= 2:
             out.append({
                 "id": link["id"],
+                "source_id": link.get("source_id"),
+                "target_id": link.get("target_id"),
                 "source_kind": link.get("source_kind", ""),
                 "target_kind": link.get("target_kind", ""),
                 "drop_m": link.get("drop_m"),
@@ -2948,7 +2972,7 @@ def downsample_hydrology_data(hydro, target_ny, target_nx, scale):
     dx_ds = np.where(no_flow, 0.0, dx_ds / mag)
     dz_ds = np.where(no_flow, 0.0, dz_ds / mag)
 
-    return {
+    out = {
         "nx":             int(target_nx),
         "ny":             int(target_ny),
         "accumulation":   np.round(acc_ds.ravel(), 4).tolist(),
@@ -2960,6 +2984,115 @@ def downsample_hydrology_data(hydro, target_ny, target_nx, scale):
         "sink_loads":     hydro["sink_loads"],
         "sink_count":     hydro["sink_count"],
     }
+
+    # Subcuencas para el visor: celda central de cada bloque scale×scale; si
+    # el centro no drena a ningún tragante pero otra celda del bloque sí, se
+    # conserva esa — las subcuencas de pocas celdas finas no desaparecen.
+    if hydro.get("sink_assignment"):
+        assign = np.array(hydro["sink_assignment"], dtype=np.int32).reshape(ny_hi, nx_hi)
+        mid = scale // 2
+        blocks = assign.reshape(target_ny, scale, target_nx, scale)
+        center = blocks[:, mid, :, mid]
+        block_max = blocks.max(axis=(1, 3))
+        assign_ds = np.where(center >= 0, center, block_max)
+        out["sink_assignment"] = assign_ds.ravel().tolist()
+        out["sink_ids"] = list(hydro.get("sink_ids", []))
+        out["sink_areas"] = dict(hydro.get("sink_areas", {}))
+    return out
+
+
+def _surface_sink_is_inlet(sink):
+    """True para tragantes; desfogues siguen siendo terminales sin area forzada."""
+    kind = str((sink or {}).get("kind") or "").strip().lower()
+    if kind:
+        return kind == "tragante"
+    sink_id = str((sink or {}).get("id") or "").strip().lower()
+    return sink_id.startswith("tragante")
+
+
+def _build_inlet_influence_owner(ny, nx, inlet_cells, cell_w, cell_h, radius_m):
+    """
+    Construye un Voronoi raster local: dentro del radio, cada celda pertenece
+    al tragante mas cercano. Fuera del radio queda en -1.
+    """
+    owner = np.full((ny, nx), -1, dtype=np.int32)
+    if not inlet_cells or radius_m <= 0.0 or cell_w <= 0.0 or cell_h <= 0.0:
+        return owner
+
+    owner_d2 = np.full((ny, nx), np.inf, dtype=np.float64)
+    radius2 = radius_m * radius_m
+    max_dj = int(math.ceil(radius_m / cell_h))
+
+    for owner_idx, (_sink_id, sj, si) in enumerate(inlet_cells):
+        j0 = max(0, sj - max_dj)
+        j1 = min(ny - 1, sj + max_dj)
+        for jj in range(j0, j1 + 1):
+            dy2 = ((jj - sj) * cell_h) ** 2
+            if dy2 > radius2:
+                continue
+            max_di = int(math.floor(math.sqrt(max(0.0, radius2 - dy2)) / cell_w))
+            i0 = max(0, si - max_di)
+            i1 = min(nx - 1, si + max_di)
+            if i0 > i1:
+                continue
+            cols = np.arange(i0, i1 + 1)
+            d2 = ((cols - si) * cell_w) ** 2 + dy2
+            current = owner_d2[jj, cols]
+            take = d2 < (current - 1e-9)
+            if np.any(take):
+                take_cols = cols[take]
+                owner_d2[jj, take_cols] = d2[take]
+                owner[jj, take_cols] = owner_idx
+
+    return owner
+
+
+def _apply_inlet_influence_receivers(
+    receiver, slopes, influence_owner, inlet_cells, sink_cells, flat_index,
+    cell_w, cell_h,
+):
+    """
+    Fuerza el D8 local para que las celdas del area de influencia avancen hacia
+    su tragante propietario. Esto conserva la division Voronoi entre tragantes
+    cercanos y deja los demas sumideros como terminales.
+    """
+    if not inlet_cells:
+        return 0
+
+    changed = 0
+    owner_cells = [(j, i) for _sink_id, j, i in inlet_cells]
+    rows, cols = np.nonzero(influence_owner >= 0)
+
+    for j, i in zip(rows, cols):
+        if (int(j), int(i)) in sink_cells:
+            continue
+        owner_idx = int(influence_owner[j, i])
+        sj, si = owner_cells[owner_idx]
+        current_d2 = ((i - si) * cell_w) ** 2 + ((j - sj) * cell_h) ** 2
+        best_d2 = current_d2
+        best_idx = -1
+
+        for dj in (-1, 0, 1):
+            for di in (-1, 0, 1):
+                if dj == 0 and di == 0:
+                    continue
+                nj = int(j) + dj
+                ni = int(i) + di
+                if nj < 0 or nj >= receiver.shape[0] or ni < 0 or ni >= receiver.shape[1]:
+                    continue
+                if int(influence_owner[nj, ni]) != owner_idx:
+                    continue
+                d2 = ((ni - si) * cell_w) ** 2 + ((nj - sj) * cell_h) ** 2
+                if d2 < (best_d2 - 1e-9):
+                    best_d2 = d2
+                    best_idx = int(flat_index[nj, ni])
+
+        if best_idx >= 0:
+            receiver[j, i] = best_idx
+            slopes[j, i] = max(float(slopes[j, i]), 1e-6)
+            changed += 1
+
+    return changed
 
 
 def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None, source_weight=None):
@@ -2979,6 +3112,12 @@ def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None, source
             "arrow_count": 0,
             "sink_loads": {},
             "sink_count": 0,
+            "receivers": [],
+            "cell_area_m2": 0.0,
+            "sink_cells": {},
+            "sink_assignment": [],
+            "sink_ids": [],
+            "sink_areas": {},
         }
 
     mpd_lon = 111320.0 * math.cos(math.radians(lat_center))
@@ -2989,19 +3128,31 @@ def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None, source
     cell_h = height_m / max(ny - 1, 1)
 
     sink_ids_by_cell = {}
+    sink_meta_by_id = {}
     for sink in surface_sinks or []:
         lon = sink.get("lon")
         lat = sink.get("lat")
         sink_id = sink.get("id")
         if lon is None or lat is None or not sink_id:
             continue
+        sink_meta_by_id[sink_id] = sink
         fi = (lon - lons[0]) / max(lons[-1] - lons[0], 1e-9) * (nx - 1)
         fj = (lat - lats[0]) / max(lats[-1] - lats[0], 1e-9) * (ny - 1)
         i = int(np.clip(round(fi), 0, nx - 1))
-        j = int(np.clip(round(fj), 0, ny - 1))
+        # dem_view esta volteado (fila 0 = norte); fj viene con fila 0 = sur.
+        j = int(np.clip(round((ny - 1) - fj), 0, ny - 1))
         sink_ids_by_cell.setdefault((j, i), []).append(sink_id)
 
     sink_cells = set(sink_ids_by_cell.keys())
+    inlet_cells = []
+    inlet_cell_seen = set()
+    for (j, i), sink_ids in sorted(sink_ids_by_cell.items()):
+        for sink_id in sink_ids:
+            sink_meta = sink_meta_by_id.get(sink_id, {"id": sink_id})
+            if _surface_sink_is_inlet(sink_meta) and (j, i) not in inlet_cell_seen:
+                inlet_cells.append((sink_id, j, i))
+                inlet_cell_seen.add((j, i))
+                break
 
     if source_weight is not None:
         source_view = np.flipud(source_weight).astype(np.float64)
@@ -3048,6 +3199,20 @@ def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None, source
                     best_idx = flat_index[nj, ni]
             receiver[j, i] = best_idx
             slopes[j, i] = best_slope
+
+    influence_owner = _build_inlet_influence_owner(
+        ny, nx, inlet_cells, cell_w, cell_h, INLET_INFLUENCE_RADIUS_M
+    )
+    influenced_cells = _apply_inlet_influence_receivers(
+        receiver, slopes, influence_owner, inlet_cells, sink_cells, flat_index,
+        cell_w, cell_h,
+    )
+    if influenced_cells:
+        print(
+            f"  Influencia de tragantes: {len(inlet_cells)} tragantes, "
+            f"radio {INLET_INFLUENCE_RADIUS_M:.1f} m, "
+            f"{influenced_cells} celdas guiadas"
+        )
 
     receiver_flat = receiver.ravel()
     indegree = np.zeros(ny * nx, dtype=np.int32)
@@ -3109,6 +3274,43 @@ def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None, source
         for sink_id in sink_ids:
             sink_loads[sink_id] = round(max(cell_load, sink_loads.get(sink_id, 0.0)), 2)
 
+    # Subcuenca de cada celda: se sigue la cadena de receptores D8 hasta el
+    # tragante terminal (mismo criterio que assign_tributary_cells del lado
+    # servidor). -1 = drena al borde/fuera de la red.
+    sink_id_list = []
+    sink_cell_to_index = {}
+    for (j, i), sink_ids in sorted(sink_ids_by_cell.items()):
+        sink_cell_to_index[j * nx + i] = len(sink_id_list)
+        sink_id_list.append(sink_ids[0])
+
+    total_cells = ny * nx
+    assignment = np.full(total_cells, -2, dtype=np.int32)  # -2 = sin visitar
+    for cell, sink_idx in sink_cell_to_index.items():
+        assignment[cell] = sink_idx
+    for start in range(total_cells):
+        if assignment[start] != -2:
+            continue
+        path = []
+        current = start
+        while assignment[current] == -2:
+            path.append(current)
+            assignment[current] = -3  # en curso (detecta ciclos)
+            nxt = receiver_flat[current]
+            if nxt < 0:
+                break
+            current = int(nxt)
+        state = int(assignment[current])
+        result = state if state >= -1 else -1
+        for cell in path:
+            assignment[cell] = result
+
+    sink_areas = {}
+    if sink_id_list:
+        counts = np.bincount(assignment[assignment >= 0], minlength=len(sink_id_list))
+        cell_area = cell_w * cell_h
+        for sink_idx, sink_id in enumerate(sink_id_list):
+            sink_areas[sink_id] = round(float(counts[sink_idx]) * cell_area, 1)
+
     return {
         "accumulation": np.round(acc_overlay.ravel(), 4).tolist(),
         "arrow_dx": np.round(arrow_dx.ravel(), 4).tolist(),
@@ -3118,7 +3320,100 @@ def build_flow_hydrology(dem, lons, lats, lat_center, surface_sinks=None, source
         "arrow_count": valid_arrows,
         "sink_loads": sink_loads,
         "sink_count": len(sink_ids_by_cell),
+        # Topología D8 del DEM excavado, indexada norte-arriba (fila 0 = norte),
+        # para exportar al servidor (SurfaceGrid de swmm_integration).
+        "receivers": receiver_flat.tolist(),
+        "cell_area_m2": float(cell_w * cell_h),
+        "sink_cells": {
+            sink_id: int(j * nx + i)
+            for (j, i), sink_ids in sink_ids_by_cell.items()
+            for sink_id in sink_ids
+        },
+        # Subcuencas: índice de tragante por celda (norte-arriba), su lista de
+        # ids y el área tributaria física de cada uno.
+        "sink_assignment": assignment.tolist(),
+        "sink_ids": sink_id_list,
+        "sink_areas": sink_areas,
     }
+
+
+def export_surface_grid(hydrology_hires, surface_layers, surface_sinks, scale,
+                        out_path, params=None):
+    """
+    Exporta la topología D8 del DEM excavado a un JSON con el esquema de
+    SurfaceGrid (swmm_integration.schemas), para que el servidor pueda correr
+    hidrología/SWMM sin que el cliente arme el grid. Indexado norte-arriba
+    (fila 0 = norte), igual que `receivers` de build_flow_hydrology.
+    """
+    receivers = hydrology_hires.get("receivers") or []
+    if not receivers:
+        print("  AVISO: hidrología sin receptores; surface_grid.json omitido")
+        return None
+
+    # Coberturas: mismas máscaras y umbrales que build_surface_layers
+    # (calle > edificio > vegetación > base), upsampleadas a la resolución
+    # de flujo y volteadas a norte-arriba para alinear con `receivers`.
+    veg_hi = upsample_dem_numpy(np.asarray(surface_layers["vegetation"], dtype=np.float64), scale)
+    bld_hi = upsample_dem_numpy(np.asarray(surface_layers["buildings"], dtype=np.float64), scale)
+    str_hi = upsample_dem_numpy(np.asarray(surface_layers["streets"], dtype=np.float64), scale)
+    codes = np.zeros(veg_hi.shape, dtype=np.uint8)
+    codes[veg_hi > 0.45] = 1
+    codes[bld_hi > 0.5] = 2
+    codes[str_hi > 0.05] = 3
+    codes = np.flipud(codes)
+    ny, nx = codes.shape
+    if ny * nx != len(receivers):
+        print(f"  AVISO: coberturas {ny}x{nx} no coinciden con receptores "
+              f"({len(receivers)}); surface_grid.json omitido")
+        return None
+
+    sink_cells = hydrology_hires.get("sink_cells") or {}
+    warnings = []
+    sinks_out = []
+    used_cells = {}
+    for sink in surface_sinks or []:
+        sink_id = sink.get("id")
+        if not sink_id or sink_id not in sink_cells:
+            continue
+        cell = int(sink_cells[sink_id])
+        if cell in used_cells:
+            warnings.append(
+                f"Tragante {sink_id} comparte la celda {cell} con "
+                f"{used_cells[cell]}; se omite del grid"
+            )
+            continue
+        used_cells[cell] = sink_id
+        sinks_out.append({
+            "id": sink_id,
+            "cell_index": cell,
+            "lon": sink.get("lon"),
+            "lat": sink.get("lat"),
+        })
+
+    payload = {
+        "version": 1,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "params": params or {},
+        "nx": int(nx),
+        "ny": int(ny),
+        "cell_area_m2": float(hydrology_hires.get("cell_area_m2") or 0.0),
+        "receivers": receivers,
+        "coverage_codes": codes.ravel().tolist(),
+        "coverage_legend": ["base", "vegetation", "building", "street"],
+        "sinks": sinks_out,
+        "warnings": warnings,
+    }
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    os.replace(tmp_path, out_path)
+    size_mb = out_path.stat().st_size / 1_048_576
+    print(f"  Surface grid exportado: {out_path} ({size_mb:.1f} MB, "
+          f"{len(sinks_out)} tragantes)")
+    return out_path
 
 
 def routes_to_threejs(gps_routes, lon_center, lat_center):
@@ -3266,7 +3561,7 @@ def download_vendors():
 #  8. GENERACIÓN DEL HTML
 # ─────────────────────────────────────────────────────────────
 
-def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center, street_poly_data=None, surface_data=None):
+def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainage_pts_3d, hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d, streets_3d, buildings_3d, tex_b64, catastro_b64, vendor_js, lon_center, lat_center, street_poly_data=None, surface_data=None, terrain_params=None):
     """
     Genera el HTML autocontenido con Three.js.
     - Curvas de nivel: visibles en 3D (sobre la superficie del terreno)
@@ -3332,6 +3627,16 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     curtain_json   = json.dumps(curtain) if curtain else "null"
     hydrology_json = json.dumps(hydrology_data)
     surface_json   = json.dumps(surface_data or {})
+    ui_scenario_json = json.dumps(load_ui_scenario(BASE_DIR / "results" / "swmm" / "ui_scenario.json"), ensure_ascii=False)
+    terrain_defaults = {
+        "street_depth": 1.5,
+        "street_width": 1.0,
+        "street_ramp": 7.0,
+        "river_depth": 2.5,
+        "river_width": 4.0,
+    }
+    terrain_defaults.update(terrain_params or {})
+    terrain_params_json = json.dumps(terrain_defaults)
 
     html = f"""<!DOCTYPE html>
 <html lang="es">
@@ -3385,7 +3690,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     font-size:11px;
     line-height:1.6;
   }}
-  #layer-panel {{
+  #layer-panel, #scenario-panel {{
     position:absolute; top:14px; right:14px;
     width:224px;
     max-height:calc(100vh - 28px);
@@ -3399,7 +3704,10 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     font-size:12px;
     line-height:1.5;
   }}
-  #layer-panel h3 {{ font-size:13px; color:#7ecfff; margin-bottom:6px; }}
+  #scenario-panel {{
+    width:300px;
+  }}
+  #layer-panel h3, #scenario-panel h3 {{ font-size:13px; color:#7ecfff; margin-bottom:6px; }}
   .layer-subtitle {{
     margin:10px 0 6px;
     color:#95d9ff;
@@ -3502,14 +3810,276 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     border-radius:8px;
     padding:6px 8px;
   }}
+  .param-section {{
+    border-top:1px solid rgba(111, 190, 255, 0.16);
+    padding-top:8px;
+    margin-top:8px;
+  }}
+  .param-row {{
+    display:block;
+    margin:7px 0;
+  }}
+  .param-row span {{
+    display:flex;
+    justify-content:space-between;
+    gap:8px;
+    color:#d8efff;
+    font-size:11px;
+  }}
+  .param-row strong {{
+    color:#7ecfff;
+    white-space:nowrap;
+  }}
+  .param-input, .param-textarea {{
+    width:100%;
+    margin-top:5px;
+    background:#13283b;
+    color:#d8efff;
+    border:1px solid rgba(111, 190, 255, 0.25);
+    border-radius:8px;
+    padding:6px 8px;
+    font-size:11px;
+  }}
+  .param-textarea {{
+    min-height:58px;
+    resize:vertical;
+    font-family:Consolas, ui-monospace, monospace;
+  }}
+  .param-check {{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    margin:7px 0;
+    color:#d8efff;
+    font-size:11px;
+  }}
+  .param-check input {{
+    accent-color:#47c6ff;
+  }}
+  .param-actions {{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:6px;
+    margin-top:10px;
+  }}
+  #scenario-status {{
+    margin-top:8px;
+    min-height:16px;
+    color:#8ab4cc;
+    font-size:10px;
+  }}
+  #node-info {{
+    position:absolute;
+    left:14px;
+    bottom:64px;
+    width:min(252px, calc(100vw - 28px));
+    background:rgba(10,10,24,0.88);
+    color:#e8f4ff;
+    border:1px solid rgba(100,180,255,0.3);
+    border-radius:10px;
+    padding:10px 12px;
+    font-size:11px;
+    line-height:1.55;
+    z-index:6;
+  }}
+  #node-info h4 {{
+    font-size:12px;
+    color:#7ecfff;
+    margin:0 0 4px;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:8px;
+  }}
+  #node-info .node-close {{
+    cursor:pointer;
+    color:#8ab4cc;
+    font-size:13px;
+    background:none;
+    border:none;
+  }}
+  #node-info .node-metric {{
+    display:flex;
+    justify-content:space-between;
+    gap:8px;
+  }}
+  #node-info .node-status-flooded {{ color:#ff6b6b; font-weight:bold; }}
+  #node-info .node-status-normal {{ color:#7fdc9a; }}
+  #node-info .node-source {{ color:#8ab4cc; font-size:10px; margin-top:4px; }}
+  #sim-timeline {{
+    position:absolute;
+    left:50%;
+    transform:translateX(-50%);
+    bottom:14px;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    background:rgba(10,10,24,0.88);
+    border:1px solid rgba(100,180,255,0.3);
+    border-radius:10px;
+    padding:8px 14px;
+    z-index:6;
+    width:min(560px, calc(100vw - 260px));
+  }}
+  #sim-timeline.ui-hidden {{ display:none; }}
+  #sim-timeline input[type=range] {{
+    flex:1;
+    min-width:80px;
+    accent-color:#47c6ff;
+  }}
+  #sim-timeline .sim-btn {{
+    background:#13283b;
+    color:#d8efff;
+    border:1px solid rgba(111,190,255,0.25);
+    border-radius:8px;
+    padding:4px 10px;
+    font-size:13px;
+    cursor:pointer;
+  }}
+  #sim-timeline select {{
+    background:#13283b;
+    color:#d8efff;
+    border:1px solid rgba(111,190,255,0.25);
+    border-radius:6px;
+    font-size:11px;
+    padding:2px 4px;
+  }}
+  #sim-time-label {{ color:#e8f4ff; font-size:11px; min-width:96px; text-align:center; }}
+  #sim-rain-label {{ color:#8ab4cc; font-size:11px; min-width:70px; text-align:right; }}
+  #network2d-panel {{
+    position:absolute;
+    right:14px;
+    bottom:84px;
+    width:430px;
+    height:430px;
+    background:rgba(8,16,24,0.92);
+    border:1px solid rgba(100,180,255,0.28);
+    border-radius:10px;
+    box-shadow:0 10px 26px rgba(0,0,0,0.35);
+    color:#d8efff;
+    z-index:7;
+    display:flex;
+    flex-direction:column;
+    overflow:hidden;
+  }}
+  #network2d-panel.ui-hidden {{ display:none; }}
+  .network2d-head {{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:8px;
+    padding:8px 10px 6px;
+    border-bottom:1px solid rgba(100,180,255,0.14);
+    cursor:move;
+    user-select:none;
+  }}
+  .network2d-title {{
+    font-size:12px;
+    color:#7ecfff;
+    font-weight:600;
+  }}
+  .network2d-actions {{
+    display:flex;
+    gap:6px;
+  }}
+  .network2d-actions button {{
+    width:24px;
+    height:24px;
+    border:1px solid rgba(111,190,255,0.25);
+    border-radius:6px;
+    background:#13283b;
+    color:#d8efff;
+    cursor:pointer;
+    font-size:12px;
+  }}
+  #network2d-canvas {{
+    width:100%;
+    height:238px;
+    display:block;
+    background:#071018;
+    cursor:grab;
+    touch-action:none;
+  }}
+  #network2d-canvas.is-panning {{
+    cursor:grabbing;
+  }}
+  .network2d-controls {{
+    display:grid;
+    grid-template-columns:auto auto 1fr auto auto auto auto auto;
+    gap:6px;
+    align-items:center;
+    padding:7px 10px 0;
+  }}
+  .network2d-controls button,
+  .network2d-controls select {{
+    height:24px;
+    border:1px solid rgba(111,190,255,0.25);
+    border-radius:6px;
+    background:#13283b;
+    color:#d8efff;
+    font-size:11px;
+    cursor:pointer;
+  }}
+  .network2d-controls button {{
+    min-width:26px;
+    padding:0 7px;
+  }}
+  .network2d-controls button:disabled {{
+    opacity:0.45;
+    cursor:not-allowed;
+  }}
+  #network2d-time-range {{
+    width:100%;
+    min-width:80px;
+  }}
+  #network2d-time-label {{
+    color:#8ab4cc;
+    font-size:10px;
+    min-width:54px;
+    text-align:center;
+  }}
+  #network2d-metrics {{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:4px 10px;
+    padding:8px 10px 6px;
+    font-size:10px;
+    line-height:1.35;
+  }}
+  #network2d-metrics span {{
+    color:#82a8bc;
+  }}
+  #network2d-metrics strong {{
+    color:#ecfbff;
+    font-weight:600;
+  }}
+  .network2d-legend {{
+    display:grid;
+    grid-template-columns:1fr 1fr 1fr;
+    gap:4px 8px;
+    padding:0 10px 9px;
+    font-size:9px;
+    color:#91aebd;
+  }}
+  .network2d-legend i {{
+    display:inline-block;
+    width:9px;
+    height:9px;
+    border-radius:50%;
+    margin-right:4px;
+    vertical-align:-1px;
+  }}
   @media (max-width: 900px) {{
     #ui-buttons {{
       right:14px;
       top:auto;
       bottom:14px;
     }}
-    #layer-panel {{
+    #layer-panel, #scenario-panel {{
       width:min(224px, calc(100vw - 28px));
+    }}
+    #scenario-panel {{
+      width:min(300px, calc(100vw - 28px));
     }}
     #legend {{
       top:14px;
@@ -3518,6 +4088,22 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
       max-width:none;
       max-height:42vh;
     }}
+    #network2d-panel {{
+      right:14px;
+      bottom:78px;
+      width:min(380px, calc(100vw - 28px));
+      height:390px;
+    }}
+    #network2d-canvas {{
+      height:190px;
+    }}
+    .network2d-controls {{
+      grid-template-columns:auto auto 1fr auto auto auto;
+    }}
+    #network2d-run-btn,
+    #network2d-focus-btn {{
+      display:none;
+    }}
   }}
 </style>
 </head>
@@ -3525,8 +4111,10 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
 <div id="canvas-container"></div>
 <div id="ui-buttons">
   <button id="toggle-panel-btn" class="floating-toggle" type="button">Capas</button>
+  <button id="toggle-params-btn" class="floating-toggle" type="button">Parámetros</button>
+  <button id="toggle-network2d-btn" class="floating-toggle" type="button">Red 2D</button>
   <button id="toggle-legend-btn" class="floating-toggle" type="button">Leyenda</button>
-  <a id="nav-tuner-btn" class="floating-toggle" href="http://localhost:8765/" target="_blank" rel="noopener" style="text-decoration:none">Ajustar excavación</a>
+  <a id="nav-tuner-btn" class="floating-toggle" href="../ajustar-excavacion" target="_blank" rel="noopener" style="text-decoration:none">Ajustar excavación</a>
 </div>
 
 <div id="info">
@@ -3538,18 +4126,20 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <div class="stat">Ancho área: {dem_data['width_m']:.0f} m</div>
   <div class="stat">Alto área: {dem_data['height_m']:.0f} m</div>
   <div class="stat">Acum. máx flujo: {hydrology_data['max_accumulation']} celdas</div>
-  <div class="stat">Infiltración media: {(surface_data or {}).get('stats', {}).get('mean_infiltration', 0):.2f}</div>
-  <div class="stat">Escorrentia media: {mean_runoff_pct:.0f}%</div>
+  <div class="stat">Infiltración media: <span id="mean-infiltration-stat">{(surface_data or {}).get('stats', {}).get('mean_infiltration', 0):.2f}</span></div>
+  <div class="stat">Escorrentia media: <span id="mean-runoff-stat">{mean_runoff_pct:.0f}%</span></div>
   <div class="stat">Vegetación estimada: {(surface_data or {}).get('stats', {}).get('vegetation_pct', 0):.1f}%</div>
   <div class="stat">Nodos hidráulicos: {len(hydraulic_nodes_3d)}</div>
   <div class="stat">Entradas/salidas superficiales: {hydrology_data.get('sink_count', 0)}</div>
+  <div class="stat">DEM rio: {terrain_defaults['river_depth']:.1f} m | ancho {terrain_defaults['river_width']:.1f} m</div>
+  <div class="stat">DEM calles: {terrain_defaults['street_depth']:.1f} m | borde {terrain_defaults['street_ramp']:.1f} m</div>
   <div class="stat">Edificios 3D: {len(buildings_3d)}</div>
   <div class="stat" id="arrow-count-stat">Flechas visibles: 0</div>
 </div>
 
 <div id="layer-panel">
   <h3>Capas</h3>
-  <a class="layer-btn layer-btn--wide" href="http://localhost:8765/" target="_blank" rel="noopener">Ajustar excavación</a>
+  <a class="layer-btn layer-btn--wide" href="../ajustar-excavacion" target="_blank" rel="noopener">Ajustar excavación</a>
   <div class="layer-subtitle">Base</div>
   <label class="layer-row"><input type="radio" name="base-mode" value="simple" checked>Terreno simple</label>
   <label class="layer-row"><input type="radio" name="base-mode" value="satellite" {'disabled' if not has_texture else ''}>Imagen satelital{' (no disponible)' if not has_texture else ''}</label>
@@ -3642,10 +4232,138 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
     <input id="arrow-density" class="layer-range" type="range" min="1" max="5" step="1" value="3">
     <span class="layer-note">Baja a alta densidad</span>
   </label>
+  <label class="layer-row"><input id="toggle-subcatchments" type="checkbox">Subcuencas por tragante</label>
+  <div class="layer-note">Área que drena a cada tragante (D8 sobre el DEM excavado). Click en un tragante para resaltar la suya.</div>
   <label class="layer-row"><input id="toggle-green" type="checkbox">Zonas verdes</label>
   <label class="layer-row"><input id="toggle-drainage" type="checkbox">Desfogues</label>
   <label class="layer-row"><input id="toggle-curtain" type="checkbox">Área de estudio</label>
   <label class="layer-row"><input id="toggle-grid" type="checkbox">Retícula</label>
+</div>
+
+<div id="scenario-panel" class="ui-hidden">
+  <h3>Parámetros</h3>
+
+  <div class="layer-subtitle">Terreno</div>
+  <div class="param-section">
+    <label class="param-row">
+      <span>Prof. calles <strong id="param-terrain-street-depth-label">1.5 m</strong></span>
+      <input id="param-terrain-street-depth" class="layer-range" type="range" min="0.3" max="3.0" step="0.1" value="1.5">
+    </label>
+    <label class="param-row">
+      <span>Ancho calles <strong id="param-terrain-street-width-label">1.0x</strong></span>
+      <input id="param-terrain-street-width" class="layer-range" type="range" min="0.4" max="3.0" step="0.1" value="1.0">
+    </label>
+    <label class="param-row">
+      <span>Borde calles <strong id="param-terrain-street-ramp-label">7.0 m</strong></span>
+      <input id="param-terrain-street-ramp" class="layer-range" type="range" min="1" max="20" step="0.5" value="7.0">
+    </label>
+    <label class="param-row">
+      <span>Prof. río <strong id="param-terrain-river-depth-label">2.5 m</strong></span>
+      <input id="param-terrain-river-depth" class="layer-range" type="range" min="0.5" max="6.0" step="0.1" value="2.5">
+    </label>
+    <label class="param-row">
+      <span>Ancho río <strong id="param-terrain-river-width-label">4.0 m</strong></span>
+      <input id="param-terrain-river-width" class="layer-range" type="range" min="1" max="15" step="0.5" value="4.0">
+    </label>
+    <button type="button" class="layer-btn layer-btn--wide" id="apply-terrain-btn">Aplicar terreno</button>
+  </div>
+
+  <div class="layer-subtitle">Superficie</div>
+  <div class="param-section">
+    <label class="param-row">
+      <span>Suelo abierto <strong id="param-inf-base-label">22%</strong></span>
+      <input id="param-inf-base" class="layer-range" type="range" min="0" max="100" step="1" value="22">
+    </label>
+    <label class="param-row">
+      <span>Vegetación <strong id="param-inf-vegetation-label">90%</strong></span>
+      <input id="param-inf-vegetation" class="layer-range" type="range" min="0" max="100" step="1" value="90">
+    </label>
+    <label class="param-row">
+      <span>Edificios <strong id="param-inf-building-label">2%</strong></span>
+      <input id="param-inf-building" class="layer-range" type="range" min="0" max="100" step="1" value="2">
+    </label>
+    <label class="param-row">
+      <span>Calles <strong id="param-inf-street-label">6%</strong></span>
+      <input id="param-inf-street" class="layer-range" type="range" min="0" max="100" step="1" value="6">
+    </label>
+  </div>
+
+  <div class="layer-subtitle">Lluvia</div>
+  <div class="param-section">
+    <label class="param-row">
+      <span>Escenario</span>
+      <input id="param-scenario-name" class="param-input" type="text" value="tormenta-base">
+    </label>
+    <label class="param-row">
+      <span>Intensidad <strong id="param-rain-intensity-label">60 mm/h</strong></span>
+      <input id="param-rain-intensity" class="layer-range" type="range" min="0" max="250" step="1" value="60">
+    </label>
+    <label class="param-row">
+      <span>Duración <strong id="param-rain-duration-label">30 min</strong></span>
+      <input id="param-rain-duration" class="layer-range" type="range" min="5" max="360" step="5" value="30">
+    </label>
+    <label class="param-row">
+      <span>Intervalo <strong id="param-rain-interval-label">5 min</strong></span>
+      <input id="param-rain-interval" class="layer-range" type="range" min="1" max="60" step="1" value="5">
+    </label>
+    <label class="param-row">
+      <span>Factor seguridad <strong id="param-rain-safety-label">1.0x</strong></span>
+      <input id="param-rain-safety" class="layer-range" type="range" min="0.5" max="3" step="0.1" value="1">
+    </label>
+  </div>
+
+  <div class="layer-subtitle">Tragantes</div>
+  <div class="param-section">
+    <label class="param-check"><input id="param-capture-active" type="checkbox" checked>Captura activa</label>
+    <label class="param-row">
+      <span>Modo captura</span>
+      <select id="param-capture-mode" class="param-input">
+        <option value="complete" selected>Completa</option>
+        <option value="limited">Limitada</option>
+      </select>
+    </label>
+    <label class="param-row">
+      <span>Capacidad <strong id="param-capacity-label">100 L/s</strong></span>
+      <input id="param-capacity" class="layer-range" type="range" min="0" max="1000" step="10" value="100">
+    </label>
+    <label class="param-row">
+      <span>Eficiencia <strong id="param-efficiency-label">100%</strong></span>
+      <input id="param-efficiency" class="layer-range" type="range" min="0" max="100" step="1" value="100">
+    </label>
+    <label class="param-row">
+      <span>Obstrucción <strong id="param-obstruction-label">0%</strong></span>
+      <input id="param-obstruction" class="layer-range" type="range" min="0" max="100" step="1" value="0">
+    </label>
+    <label class="param-row">
+      <span>Almacenamiento <strong id="param-storage-label">0 m3</strong></span>
+      <input id="param-storage" class="layer-range" type="range" min="0" max="500" step="5" value="0">
+    </label>
+    <label class="param-check"><input id="param-allow-bypass" type="checkbox" checked>Bypass superficial</label>
+  </div>
+
+  <div class="layer-subtitle">SWMM</div>
+  <div class="param-section">
+    <label class="param-row">
+      <span>Modelo INP</span>
+      <input id="param-inp-path" class="param-input" type="text" value="models/cariari_base.inp">
+    </label>
+    <label class="param-row">
+      <span>Paso reporte <strong id="param-report-step-label">5 min</strong></span>
+      <input id="param-report-step" class="layer-range" type="range" min="1" max="60" step="1" value="5">
+    </label>
+    <label class="param-row">
+      <span>Mapeo tragante:nodo</span>
+      <textarea id="param-node-mapping" class="param-textarea">T1:T1
+T2:T2</textarea>
+    </label>
+  </div>
+
+  <div class="param-actions">
+    <button type="button" class="layer-btn" id="save-scenario-btn">Guardar</button>
+    <button type="button" class="layer-btn" id="validate-swmm-btn">Validar SWMM</button>
+  </div>
+  <button type="button" class="layer-btn layer-btn--wide" id="run-simulation-btn" style="margin:8px 0 0">🌧 Simular lluvia</button>
+  <div id="scenario-status"></div>
 </div>
 
 <div id="legend" class="ui-hidden">
@@ -3662,6 +4380,7 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
   <div class="leg-item"><span class="leg-swatch" style="background:linear-gradient(90deg,#80322c,#f2d56b,#2fbf71);height:10px;border-radius:3px"></span>Infiltración degradada</div>
   <div class="leg-item"><span id="flow-legend-swatch" class="leg-swatch" style="background:linear-gradient(90deg,rgba(255,224,128,0),rgba(255,224,128,1));height:10px;border-radius:3px"></span>Acumulación de flujo</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#8fe9ff;height:3px"></span>Flechas de flujo</div>
+  <div class="leg-item"><span class="leg-swatch" style="background:linear-gradient(90deg,#e6704d 0 25%,#4dc9e6 25% 50%,#a3e64d 50% 75%,#c94de6 75%);height:10px;border-radius:3px;opacity:0.75"></span>Subcuencas por tragante</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#ff9f1c;width:12px;height:12px;border-radius:50%"></span>Tragantes / sumideros</div>
   <div class="leg-item"><span class="leg-swatch" style="background:#ffffff;width:12px;height:12px;border-radius:50%;border:1px solid #2f7de1"></span>CRP / CRN nodos</div>
 
@@ -3672,6 +4391,58 @@ def make_html(dem_data, hydrology_data, contours_3d, curtain, rivers_3d, drainag
 
 <div id="controls-hint">
   🖱 Arrastrar: Orbitar &nbsp;|&nbsp; Scroll: Zoom &nbsp;|&nbsp; Clic derecho: Desplazar
+</div>
+
+<div id="node-info" class="ui-hidden"></div>
+
+<div id="network2d-panel" class="ui-hidden">
+  <div class="network2d-head">
+    <div class="network2d-title">Red 2D - simulación</div>
+    <div class="network2d-actions">
+      <button type="button" id="network2d-fit-btn" title="Ajustar vista">⌖</button>
+      <button type="button" id="network2d-close-btn" title="Cerrar">×</button>
+    </div>
+  </div>
+  <canvas id="network2d-canvas"></canvas>
+  <div class="network2d-controls">
+    <button type="button" id="network2d-run-btn" title="Simular lluvia">Simular</button>
+    <button type="button" id="network2d-play-btn" title="Reproducir / pausar">&gt;</button>
+    <input id="network2d-time-range" type="range" min="0" max="30" step="any" value="0" disabled>
+    <span id="network2d-time-label">--:--</span>
+    <select id="network2d-speed" title="Velocidad">
+      <option value="1">1x</option>
+      <option value="5" selected>5x</option>
+      <option value="15">15x</option>
+    </select>
+    <button type="button" id="network2d-zoom-out-btn" title="Alejar">-</button>
+    <button type="button" id="network2d-zoom-in-btn" title="Acercar">+</button>
+    <button type="button" id="network2d-focus-btn" title="Enfocar seleccionado">*</button>
+  </div>
+  <div id="network2d-metrics">
+    <div><span>Nodo</span><br><strong id="network2d-node">--</strong></div>
+    <div><span>Estado</span><br><strong id="network2d-status">--</strong></div>
+    <div><span>Llenado</span><br><strong id="network2d-fill">--</strong></div>
+    <div><span>Nivel</span><br><strong id="network2d-depth">--</strong></div>
+    <div><span>Caudal</span><br><strong id="network2d-flow">--</strong></div>
+    <div><span>Inundación</span><br><strong id="network2d-flood">--</strong></div>
+  </div>
+  <div class="network2d-legend">
+    <div><i style="background:#2f7de1"></i>Bajo</div>
+    <div><i style="background:#f4c542"></i>Alto</div>
+    <div><i style="background:#ff2d2d"></i>Inundado</div>
+  </div>
+</div>
+
+<div id="sim-timeline" class="ui-hidden">
+  <button type="button" class="sim-btn" id="sim-play-btn" title="Reproducir / pausar">▶</button>
+  <input id="sim-time-range" type="range" min="0" max="30" step="any" value="0">
+  <span id="sim-time-label">--:--</span>
+  <select id="sim-speed" title="Velocidad de reproducción">
+    <option value="1">1×</option>
+    <option value="5" selected>5×</option>
+    <option value="15">15×</option>
+  </select>
+  <span id="sim-rain-label"></span>
 </div>
 
 <!-- Three.js r128 embebido -->
@@ -3708,6 +4479,8 @@ const BUILDINGS = {buildings_json};
 const CURTAIN        = {curtain_json};
 const HYDROLOGY      = {hydrology_json};
 const SURFACE        = {surface_json};
+const UI_SCENARIO    = {ui_scenario_json};
+const TERRAIN_PARAMS = {terrain_params_json};
 const HAS_TEX        = {'true' if has_texture else 'false'};
 const TEX_URI        = "{tex_data_uri if has_texture else ''}";
 const HAS_CATASTRO   = {'true' if has_catastro else 'false'};
@@ -3750,6 +4523,8 @@ let terrainSatelliteMesh = null;
 let terrainSimpleMesh = null;
 let flowAccumMesh = null;
 let flowAccumColorAttr = null;
+let subcatchmentColorAttr = null;
+let selectedNodeId = null;  // tragante/nodo seleccionado con click
 
 const baseTerrainLayer = new THREE.Group();
 const catastroLayer = new THREE.Group();
@@ -3768,11 +4543,13 @@ const greenLayer = new THREE.Group();
 const drainageLayer = new THREE.Group();
 const flowAccumLayer = new THREE.Group();
 const flowArrowLayer = new THREE.Group();
+const subcatchmentLayer = new THREE.Group();
 
 for (const layer of [
   baseTerrainLayer, catastroLayer, gridLayer, curtainLayer, contourLayer,
   riverLayer, streetLayer, streetOverlayLayer, buildingLayer, hydraulicNodeLayer, hydraulicLinkLayer,
-  vegetationLayer, infiltrationLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer
+  vegetationLayer, infiltrationLayer, greenLayer, drainageLayer, flowAccumLayer, flowArrowLayer,
+  subcatchmentLayer
 ]) {{
   scene.add(layer);
 }}
@@ -3790,6 +4567,7 @@ const layerGroups = {{
   infiltration: infiltrationLayer,
   flowAccum: flowAccumLayer,
   flowArrows: flowArrowLayer,
+  subcatchments: subcatchmentLayer,
   green: greenLayer,
   drainage: drainageLayer,
   curtain: curtainLayer,
@@ -3825,6 +4603,7 @@ const viewerState = {{
   infiltration: false,
   flowAccum: false,
   flowArrows: false,
+  subcatchments: false,
   green: false,
   drainage: false,
   curtain: false,
@@ -3927,14 +4706,70 @@ const uiBuildingWallColor = document.getElementById('building-wall-color');
 const uiBuildingRoofPalette = document.getElementById('building-roof-palette');
 const uiBuildingRoofColor = document.getElementById('building-roof-color');
 const uiLayerPanel = document.getElementById('layer-panel');
+const uiScenarioPanel = document.getElementById('scenario-panel');
 const uiLegend = document.getElementById('legend');
 const uiTogglePanelBtn = document.getElementById('toggle-panel-btn');
+const uiToggleParamsBtn = document.getElementById('toggle-params-btn');
+const uiToggleNetwork2dBtn = document.getElementById('toggle-network2d-btn');
 const uiToggleLegendBtn = document.getElementById('toggle-legend-btn');
 const uiFlowRangeLabel = document.getElementById('flow-range-label');
 const flowLegendSwatch = document.getElementById('flow-legend-swatch');
 const hydraulicLinkLegendSwatch = document.getElementById('hydraulic-link-legend-swatch');
 const arrowCountStat = document.getElementById('arrow-count-stat');
 const uiInfiltrationMode = document.getElementById('infiltration-color-mode');
+const meanInfiltrationStat = document.getElementById('mean-infiltration-stat');
+const meanRunoffStat = document.getElementById('mean-runoff-stat');
+const scenarioStatus = document.getElementById('scenario-status');
+const scenarioControls = {{
+  terrainStreetDepth: document.getElementById('param-terrain-street-depth'),
+  terrainStreetWidth: document.getElementById('param-terrain-street-width'),
+  terrainStreetRamp: document.getElementById('param-terrain-street-ramp'),
+  terrainRiverDepth: document.getElementById('param-terrain-river-depth'),
+  terrainRiverWidth: document.getElementById('param-terrain-river-width'),
+  infBase: document.getElementById('param-inf-base'),
+  infVegetation: document.getElementById('param-inf-vegetation'),
+  infBuilding: document.getElementById('param-inf-building'),
+  infStreet: document.getElementById('param-inf-street'),
+  scenarioName: document.getElementById('param-scenario-name'),
+  rainIntensity: document.getElementById('param-rain-intensity'),
+  rainDuration: document.getElementById('param-rain-duration'),
+  rainInterval: document.getElementById('param-rain-interval'),
+  rainSafety: document.getElementById('param-rain-safety'),
+  captureActive: document.getElementById('param-capture-active'),
+  captureMode: document.getElementById('param-capture-mode'),
+  capacity: document.getElementById('param-capacity'),
+  efficiency: document.getElementById('param-efficiency'),
+  obstruction: document.getElementById('param-obstruction'),
+  storage: document.getElementById('param-storage'),
+  allowBypass: document.getElementById('param-allow-bypass'),
+  inpPath: document.getElementById('param-inp-path'),
+  reportStep: document.getElementById('param-report-step'),
+  nodeMapping: document.getElementById('param-node-mapping'),
+}};
+const scenarioLabels = {{
+  terrainStreetDepth: document.getElementById('param-terrain-street-depth-label'),
+  terrainStreetWidth: document.getElementById('param-terrain-street-width-label'),
+  terrainStreetRamp: document.getElementById('param-terrain-street-ramp-label'),
+  terrainRiverDepth: document.getElementById('param-terrain-river-depth-label'),
+  terrainRiverWidth: document.getElementById('param-terrain-river-width-label'),
+  infBase: document.getElementById('param-inf-base-label'),
+  infVegetation: document.getElementById('param-inf-vegetation-label'),
+  infBuilding: document.getElementById('param-inf-building-label'),
+  infStreet: document.getElementById('param-inf-street-label'),
+  rainIntensity: document.getElementById('param-rain-intensity-label'),
+  rainDuration: document.getElementById('param-rain-duration-label'),
+  rainInterval: document.getElementById('param-rain-interval-label'),
+  rainSafety: document.getElementById('param-rain-safety-label'),
+  capacity: document.getElementById('param-capacity-label'),
+  efficiency: document.getElementById('param-efficiency-label'),
+  obstruction: document.getElementById('param-obstruction-label'),
+  storage: document.getElementById('param-storage-label'),
+  reportStep: document.getElementById('param-report-step-label'),
+}};
+const applyTerrainBtn = document.getElementById('apply-terrain-btn');
+const saveScenarioBtn = document.getElementById('save-scenario-btn');
+const validateSwmmBtn = document.getElementById('validate-swmm-btn');
+let scenarioState = JSON.parse(JSON.stringify(UI_SCENARIO || {{}}));
 const uiToggles = {{
   streets: document.getElementById('toggle-streets'),
   streetOverlay: document.getElementById('toggle-street-overlay'),
@@ -3947,6 +4782,7 @@ const uiToggles = {{
   infiltration: document.getElementById('toggle-infiltration'),
   flowAccum: document.getElementById('toggle-flow-accum'),
   flowArrows: document.getElementById('toggle-flow-arrows'),
+  subcatchments: document.getElementById('toggle-subcatchments'),
   green: document.getElementById('toggle-green'),
   drainage: document.getElementById('toggle-drainage'),
   curtain: document.getElementById('toggle-curtain'),
@@ -3991,6 +4827,325 @@ scene.add(new THREE.HemisphereLight(0x87ceeb, 0x3a3a2a, 0.20));
 // ═══════════════════════════════════════════════════════════════
 function clamp(value, min, max) {{
   return Math.max(min, Math.min(max, value));
+}}
+
+function scenarioApiBase() {{
+  const marker = '/resultados_refinados/';
+  const path = window.location.pathname || '';
+  const idx = path.indexOf(marker);
+  return idx >= 0 ? path.slice(0, idx) : '';
+}}
+
+function setScenarioStatus(message, isError=false) {{
+  if (!scenarioStatus) return;
+  scenarioStatus.textContent = message || '';
+  scenarioStatus.style.color = isError ? '#ff9b9b' : '#8ab4cc';
+}}
+
+function parseScenarioMapping(text) {{
+  const mapping = {{}};
+  String(text || '').replaceAll(';', '\\n').replaceAll(',', '\\n').split('\\n').forEach((raw) => {{
+    const line = raw.trim();
+    if (!line) return;
+    let left;
+    let right;
+    if (line.includes(':')) {{
+      [left, right] = line.split(':', 2);
+    }} else if (line.includes('=')) {{
+      [left, right] = line.split('=', 2);
+    }} else {{
+      left = line;
+      right = line;
+    }}
+    left = (left || '').trim();
+    right = (right || '').trim();
+    if (left && right) mapping[left] = right;
+  }});
+  return mapping;
+}}
+
+function mergeScenarioConfig(base, override) {{
+  const out = JSON.parse(JSON.stringify(base || {{}}));
+  for (const [key, value] of Object.entries(override || {{}})) {{
+    if (value && typeof value === 'object' && !Array.isArray(value) && out[key] && typeof out[key] === 'object') {{
+      out[key] = mergeScenarioConfig(out[key], value);
+    }} else {{
+      out[key] = value;
+    }}
+  }}
+  return out;
+}}
+
+function numberFromControl(control, fallback, min, max) {{
+  const value = Number(control && control.value);
+  return clamp(Number.isFinite(value) ? value : fallback, min, max);
+}}
+
+function readTerrainControls() {{
+  return {{
+    street_depth: numberFromControl(scenarioControls.terrainStreetDepth, TERRAIN_PARAMS.street_depth ?? 1.5, 0.3, 3.0),
+    street_width: numberFromControl(scenarioControls.terrainStreetWidth, TERRAIN_PARAMS.street_width ?? 1.0, 0.4, 3.0),
+    street_ramp: numberFromControl(scenarioControls.terrainStreetRamp, TERRAIN_PARAMS.street_ramp ?? 7.0, 1.0, 20.0),
+    river_depth: numberFromControl(scenarioControls.terrainRiverDepth, TERRAIN_PARAMS.river_depth ?? 2.5, 0.5, 6.0),
+    river_width: numberFromControl(scenarioControls.terrainRiverWidth, TERRAIN_PARAMS.river_width ?? 4.0, 1.0, 15.0),
+  }};
+}}
+
+function writeTerrainControls(params) {{
+  const terrain = params || {{}};
+  if (scenarioControls.terrainStreetDepth) scenarioControls.terrainStreetDepth.value = terrain.street_depth ?? 1.5;
+  if (scenarioControls.terrainStreetWidth) scenarioControls.terrainStreetWidth.value = terrain.street_width ?? 1.0;
+  if (scenarioControls.terrainStreetRamp) scenarioControls.terrainStreetRamp.value = terrain.street_ramp ?? 7.0;
+  if (scenarioControls.terrainRiverDepth) scenarioControls.terrainRiverDepth.value = terrain.river_depth ?? 2.5;
+  if (scenarioControls.terrainRiverWidth) scenarioControls.terrainRiverWidth.value = terrain.river_width ?? 4.0;
+}}
+
+function syncTerrainLabels() {{
+  const terrain = readTerrainControls();
+  if (scenarioLabels.terrainStreetDepth) scenarioLabels.terrainStreetDepth.textContent = terrain.street_depth.toFixed(1) + ' m';
+  if (scenarioLabels.terrainStreetWidth) scenarioLabels.terrainStreetWidth.textContent = terrain.street_width.toFixed(1) + 'x';
+  if (scenarioLabels.terrainStreetRamp) scenarioLabels.terrainStreetRamp.textContent = terrain.street_ramp.toFixed(1) + ' m';
+  if (scenarioLabels.terrainRiverDepth) scenarioLabels.terrainRiverDepth.textContent = terrain.river_depth.toFixed(1) + ' m';
+  if (scenarioLabels.terrainRiverWidth) scenarioLabels.terrainRiverWidth.textContent = terrain.river_width.toFixed(1) + ' m';
+}}
+
+function applyTerrainAdjustment() {{
+  if (window.location.protocol === 'file:') {{
+    setScenarioStatus('Abra el mapa desde el servidor para aplicar terreno.', true);
+    return;
+  }}
+  const terrain = readTerrainControls();
+  const params = new URLSearchParams({{
+    street_depth: terrain.street_depth.toFixed(1),
+    street_width: terrain.street_width.toFixed(1),
+    street_ramp: terrain.street_ramp.toFixed(1),
+    river_depth: terrain.river_depth.toFixed(1),
+    river_width: terrain.river_width.toFixed(1),
+  }});
+  const url = scenarioApiBase() + '/api/excavation/run?' + params.toString();
+  let runFailed = false;
+  setScenarioStatus('Regenerando terreno y grid hidrológico...');
+  if (applyTerrainBtn) applyTerrainBtn.disabled = true;
+  const stream = new EventSource(url);
+  stream.onmessage = (event) => {{
+    if (event.data === '__done__') {{
+      stream.close();
+      if (applyTerrainBtn) applyTerrainBtn.disabled = false;
+      if (runFailed) {{
+        setScenarioStatus('No se pudo regenerar el terreno.', true);
+        return;
+      }}
+      setScenarioStatus('Terreno actualizado; recargando mapa...');
+      const reloadPath = window.location.pathname + '?t=' + Date.now();
+      window.location.replace(reloadPath);
+      return;
+    }}
+    let message = event.data;
+    try {{ message = JSON.parse(event.data); }} catch (_err) {{}}
+    message = String(message || '');
+    if (message.startsWith('ERROR:')) {{
+      runFailed = true;
+      setScenarioStatus(message, true);
+    }} else if (message.includes('Surface grid exportado')) {{
+      setScenarioStatus(message);
+    }} else if (message.includes('HTML generado') || message.includes('VERIFICADO:')) {{
+      setScenarioStatus(message);
+    }}
+  }};
+  stream.onerror = () => {{
+    stream.close();
+    if (applyTerrainBtn) applyTerrainBtn.disabled = false;
+    setScenarioStatus('Error de conexión al regenerar terreno.', true);
+  }};
+}}
+
+function syncScenarioLabels() {{
+  if (!scenarioControls.infBase) return;
+  syncTerrainLabels();
+  const infBase = numberFromControl(scenarioControls.infBase, 22, 0, 100);
+  const infVegetation = numberFromControl(scenarioControls.infVegetation, 90, 0, 100);
+  const infBuilding = numberFromControl(scenarioControls.infBuilding, 2, 0, 100);
+  const infStreet = numberFromControl(scenarioControls.infStreet, 6, 0, 100);
+  scenarioLabels.infBase.textContent = infBase.toFixed(0) + '%';
+  scenarioLabels.infVegetation.textContent = infVegetation.toFixed(0) + '%';
+  scenarioLabels.infBuilding.textContent = infBuilding.toFixed(0) + '%';
+  scenarioLabels.infStreet.textContent = infStreet.toFixed(0) + '%';
+  scenarioLabels.rainIntensity.textContent = numberFromControl(scenarioControls.rainIntensity, 60, 0, 500).toFixed(0) + ' mm/h';
+  scenarioLabels.rainDuration.textContent = numberFromControl(scenarioControls.rainDuration, 30, 1, 1440).toFixed(0) + ' min';
+  scenarioLabels.rainInterval.textContent = numberFromControl(scenarioControls.rainInterval, 5, 0.5, 240).toFixed(0) + ' min';
+  scenarioLabels.rainSafety.textContent = numberFromControl(scenarioControls.rainSafety, 1, 0.1, 5).toFixed(1) + 'x';
+  scenarioLabels.capacity.textContent = numberFromControl(scenarioControls.capacity, 100, 0, 5000).toFixed(0) + ' L/s';
+  scenarioLabels.efficiency.textContent = numberFromControl(scenarioControls.efficiency, 100, 0, 100).toFixed(0) + '%';
+  scenarioLabels.obstruction.textContent = numberFromControl(scenarioControls.obstruction, 0, 0, 100).toFixed(0) + '%';
+  scenarioLabels.storage.textContent = numberFromControl(scenarioControls.storage, 0, 0, 100000).toFixed(0) + ' m3';
+  scenarioLabels.reportStep.textContent = numberFromControl(scenarioControls.reportStep, 5, 0.5, 240).toFixed(0) + ' min';
+}}
+
+function readScenarioControls() {{
+  const nodeMappingText = scenarioControls.nodeMapping ? scenarioControls.nodeMapping.value : '';
+  scenarioState = {{
+    infiltration_pct: {{
+      base: numberFromControl(scenarioControls.infBase, 22, 0, 100),
+      vegetation: numberFromControl(scenarioControls.infVegetation, 90, 0, 100),
+      building: numberFromControl(scenarioControls.infBuilding, 2, 0, 100),
+      street: numberFromControl(scenarioControls.infStreet, 6, 0, 100),
+    }},
+    rainfall: {{
+      scenario_name: (scenarioControls.scenarioName && scenarioControls.scenarioName.value) || 'tormenta-base',
+      intensity_mm_h: numberFromControl(scenarioControls.rainIntensity, 60, 0, 500),
+      duration_min: numberFromControl(scenarioControls.rainDuration, 30, 1, 1440),
+      interval_min: numberFromControl(scenarioControls.rainInterval, 5, 0.5, 240),
+      safety_factor: numberFromControl(scenarioControls.rainSafety, 1, 0.1, 5),
+    }},
+    capture: {{
+      active: !!(scenarioControls.captureActive && scenarioControls.captureActive.checked),
+      capture_mode: (scenarioControls.captureMode && scenarioControls.captureMode.value) || 'complete',
+      nominal_capacity_l_s: numberFromControl(scenarioControls.capacity, 100, 0, 5000),
+      capture_efficiency: numberFromControl(scenarioControls.efficiency, 100, 0, 100) / 100,
+      obstruction_pct: numberFromControl(scenarioControls.obstruction, 0, 0, 100),
+      surface_storage_m3: numberFromControl(scenarioControls.storage, 0, 0, 100000),
+      allow_bypass: !!(scenarioControls.allowBypass && scenarioControls.allowBypass.checked),
+    }},
+    swmm: {{
+      inp_path: (scenarioControls.inpPath && scenarioControls.inpPath.value) || 'models/cariari_base.inp',
+      report_step_min: numberFromControl(scenarioControls.reportStep, 5, 0.5, 240),
+      node_mapping_text: nodeMappingText,
+      node_mapping: parseScenarioMapping(nodeMappingText),
+    }},
+  }};
+  return scenarioState;
+}}
+
+function writeScenarioControls(config) {{
+  scenarioState = mergeScenarioConfig(UI_SCENARIO || {{}}, config || {{}});
+  writeTerrainControls(TERRAIN_PARAMS || {{}});
+  const inf = scenarioState.infiltration_pct || {{}};
+  const rain = scenarioState.rainfall || {{}};
+  const capture = scenarioState.capture || {{}};
+  const swmm = scenarioState.swmm || {{}};
+  if (scenarioControls.infBase) scenarioControls.infBase.value = inf.base ?? 22;
+  if (scenarioControls.infVegetation) scenarioControls.infVegetation.value = inf.vegetation ?? 90;
+  if (scenarioControls.infBuilding) scenarioControls.infBuilding.value = inf.building ?? 2;
+  if (scenarioControls.infStreet) scenarioControls.infStreet.value = inf.street ?? 6;
+  if (scenarioControls.scenarioName) scenarioControls.scenarioName.value = rain.scenario_name || 'tormenta-base';
+  if (scenarioControls.rainIntensity) scenarioControls.rainIntensity.value = rain.intensity_mm_h ?? 60;
+  if (scenarioControls.rainDuration) scenarioControls.rainDuration.value = rain.duration_min ?? 30;
+  if (scenarioControls.rainInterval) scenarioControls.rainInterval.value = rain.interval_min ?? 5;
+  if (scenarioControls.rainSafety) scenarioControls.rainSafety.value = rain.safety_factor ?? 1;
+  if (scenarioControls.captureActive) scenarioControls.captureActive.checked = capture.active !== false;
+  if (scenarioControls.captureMode) scenarioControls.captureMode.value = capture.capture_mode || 'complete';
+  if (scenarioControls.capacity) scenarioControls.capacity.value = capture.nominal_capacity_l_s ?? 100;
+  if (scenarioControls.efficiency) scenarioControls.efficiency.value = Math.round((capture.capture_efficiency ?? 1) * 100);
+  if (scenarioControls.obstruction) scenarioControls.obstruction.value = capture.obstruction_pct ?? 0;
+  if (scenarioControls.storage) scenarioControls.storage.value = capture.surface_storage_m3 ?? 0;
+  if (scenarioControls.allowBypass) scenarioControls.allowBypass.checked = capture.allow_bypass !== false;
+  if (scenarioControls.inpPath) scenarioControls.inpPath.value = swmm.inp_path || 'models/cariari_base.inp';
+  if (scenarioControls.reportStep) scenarioControls.reportStep.value = swmm.report_step_min ?? 5;
+  if (scenarioControls.nodeMapping) scenarioControls.nodeMapping.value = swmm.node_mapping_text || 'T1:T1\\nT2:T2';
+  syncScenarioLabels();
+  updateSurfaceFromScenario();
+}}
+
+function updateSurfaceFromScenario() {{
+  if (!SURFACE || !SURFACE.infiltration || !SURFACE.vegetation) return;
+  const config = readScenarioControls().infiltration_pct;
+  const base = clamp(config.base / 100, 0, 1);
+  const vegetation = clamp(config.vegetation / 100, 0, 1);
+  const building = clamp(config.building / 100, 0, 1);
+  const street = clamp(config.street / 100, 0, 1);
+  let infSum = 0;
+  let runoffSum = 0;
+  for (let i = 0; i < SURFACE.infiltration.length; i++) {{
+    let value = base + (vegetation - base) * clamp(SURFACE.vegetation[i] || 0, 0, 1);
+    if ((SURFACE.buildings && (SURFACE.buildings[i] || 0) > 0.5)) value = building;
+    if ((SURFACE.streets && (SURFACE.streets[i] || 0) > 0.05)) value = street;
+    value = clamp(value, 0, 1);
+    SURFACE.infiltration[i] = value;
+    SURFACE.runoff[i] = 1 - value;
+    infSum += value;
+    runoffSum += 1 - value;
+  }}
+  const count = Math.max(1, SURFACE.infiltration.length);
+  if (meanInfiltrationStat) meanInfiltrationStat.textContent = (infSum / count).toFixed(2);
+  if (meanRunoffStat) meanRunoffStat.textContent = Math.round((runoffSum / count) * 100) + '%';
+  rebuildInfiltrationLayer();
+  if (viewerState.infiltration) infiltrationLayer.visible = true;
+}}
+
+function installScenarioControlHandlers() {{
+  [
+    scenarioControls.terrainStreetDepth, scenarioControls.terrainStreetWidth, scenarioControls.terrainStreetRamp,
+    scenarioControls.terrainRiverDepth, scenarioControls.terrainRiverWidth,
+  ].forEach((control) => {{
+    if (!control) return;
+    control.addEventListener('input', syncTerrainLabels);
+    control.addEventListener('change', syncTerrainLabels);
+  }});
+  const liveControls = [
+    scenarioControls.infBase, scenarioControls.infVegetation, scenarioControls.infBuilding, scenarioControls.infStreet,
+    scenarioControls.rainIntensity, scenarioControls.rainDuration, scenarioControls.rainInterval, scenarioControls.rainSafety,
+    scenarioControls.capacity, scenarioControls.efficiency, scenarioControls.obstruction, scenarioControls.storage,
+    scenarioControls.reportStep,
+  ];
+  liveControls.forEach((control) => {{
+    if (!control) return;
+    control.addEventListener('input', () => {{
+      syncScenarioLabels();
+      if (control.id && control.id.startsWith('param-inf-')) updateSurfaceFromScenario();
+      else readScenarioControls();
+    }});
+  }});
+  [
+    scenarioControls.scenarioName, scenarioControls.captureActive, scenarioControls.captureMode,
+    scenarioControls.allowBypass, scenarioControls.inpPath, scenarioControls.nodeMapping,
+  ].forEach((control) => {{
+    if (!control) return;
+    control.addEventListener('input', readScenarioControls);
+    control.addEventListener('change', readScenarioControls);
+  }});
+  if (saveScenarioBtn) saveScenarioBtn.addEventListener('click', saveScenarioConfig);
+  if (validateSwmmBtn) validateSwmmBtn.addEventListener('click', validateSwmmConfig);
+  if (applyTerrainBtn) applyTerrainBtn.addEventListener('click', applyTerrainAdjustment);
+}}
+
+function saveScenarioConfig() {{
+  const config = readScenarioControls();
+  window.localStorage.setItem('cariari.uiScenario', JSON.stringify(config));
+  setScenarioStatus('Guardando...');
+  return fetch(scenarioApiBase() + '/api/ui/scenario', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify(config),
+  }})
+    .then((response) => response.ok ? response.json() : Promise.reject(new Error('HTTP ' + response.status)))
+    .then(() => setScenarioStatus('Parámetros guardados'))
+    .catch(() => setScenarioStatus('Parámetros guardados localmente'));
+}}
+
+function validateSwmmConfig() {{
+  const config = readScenarioControls();
+  setScenarioStatus('Validando SWMM...');
+  return fetch(scenarioApiBase() + '/api/swmm/validate', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ inp_path: config.swmm.inp_path }}),
+  }})
+    .then((response) => response.ok ? response.json() : Promise.reject(new Error('HTTP ' + response.status)))
+    .then((report) => {{
+      if (report.valid) setScenarioStatus('SWMM válido');
+      else setScenarioStatus('SWMM con observaciones', true);
+    }})
+    .catch(() => setScenarioStatus('Validación no disponible', true));
+}}
+
+function initScenarioPanel() {{
+  let config = UI_SCENARIO || {{}};
+  try {{
+    const stored = JSON.parse(window.localStorage.getItem('cariari.uiScenario') || 'null');
+    if (stored) config = mergeScenarioConfig(config, stored);
+  }} catch (err) {{}}
+  writeScenarioControls(config);
+  installScenarioControlHandlers();
 }}
 
 function sampleTerrainHeight(x, z) {{
@@ -4240,6 +5395,12 @@ function rebuildHydraulicLinks() {{
   }}
 }}
 
+// Estado de la simulación de lluvia sobre la capa de acumulación:
+// el patrón espacial viene del D8 sobre el DEM excavado; la magnitud temporal
+// escala con la lluvia acumulada (cum_rain_frac del frame actual).
+let simWetFactor = 1.0;
+let simThresholdActive = false;
+
 function rebuildFlowAccumulation() {{
   if (!flowAccumMesh || !flowAccumColorAttr || !HYDROLOGY.accumulation || !HYDROLOGY.accumulation.length) {{
     updateFlowRangeLabel();
@@ -4251,11 +5412,17 @@ function rebuildFlowAccumulation() {{
   const minValue = clamp(viewerState.flowRangeMin, 0, 0.99);
   const maxValue = clamp(Math.max(minValue + 0.01, viewerState.flowRangeMax), minValue + 0.01, 1);
   const colors = flowAccumColorAttr.array;
+  // Con simulación activa el agua aparece primero en los cauces de mayor
+  // acumulación y el patrón se expande conforme llueve.
+  const wet = clamp(simWetFactor, 0, 1);
+  const effMin = simThresholdActive ? lerp(0.85, minValue, wet) : minValue;
+  const effMax = Math.max(effMin + 0.01, maxValue);
+  const alphaScale = simThresholdActive ? Math.pow(wet, 1.5) : 1.0;
 
   for (let i = 0; i < HYDROLOGY.accumulation.length; i++) {{
     const value = HYDROLOGY.accumulation[i];
-    const ramp = smoothStep01((value - minValue) / Math.max(1e-6, maxValue - minValue));
-    const alpha = Math.pow(ramp, 0.78) * 0.82;
+    const ramp = smoothStep01((value - effMin) / Math.max(1e-6, effMax - effMin));
+    const alpha = Math.pow(ramp, 0.78) * 0.82 * alphaScale;
     const offset = i * 4;
     colors[offset + 0] = baseColor.r / 255;
     colors[offset + 1] = baseColor.g / 255;
@@ -4336,12 +5503,14 @@ function rebuildFlowArrows() {{
       helper.cone.material.transparent = true;
       helper.cone.material.opacity = 0.88;
       helper.cone.material.depthWrite = false;
+      helper.userData.accumValue = HYDROLOGY.accumulation[idx] || 0;
       flowArrowLayer.add(helper);
       arrowCount += 1;
     }}
   }}
 
   updateArrowCountStat(arrowCount);
+  updateSimArrowVisibility();
 }}
 
 function setBaseMode(mode) {{
@@ -4561,6 +5730,24 @@ for (const [key, input] of Object.entries(uiToggles)) {{
 if (uiTogglePanelBtn && uiLayerPanel) {{
   uiTogglePanelBtn.addEventListener('click', () => {{
     uiLayerPanel.classList.toggle('ui-hidden');
+    if (uiScenarioPanel && !uiLayerPanel.classList.contains('ui-hidden')) {{
+      uiScenarioPanel.classList.add('ui-hidden');
+    }}
+  }});
+}}
+
+if (uiToggleParamsBtn && uiScenarioPanel) {{
+  uiToggleParamsBtn.addEventListener('click', () => {{
+    uiScenarioPanel.classList.toggle('ui-hidden');
+    if (uiLayerPanel && !uiScenarioPanel.classList.contains('ui-hidden')) {{
+      uiLayerPanel.classList.add('ui-hidden');
+    }}
+  }});
+}}
+
+if (uiToggleNetwork2dBtn) {{
+  uiToggleNetwork2dBtn.addEventListener('click', () => {{
+    toggleNetwork2dPanel();
   }});
 }}
 
@@ -4723,6 +5910,69 @@ function buildSimpleTerrainMaterial(geo) {{
   rebuildFlowAccumulation();
 }})();
 
+// ── Subcuencas por tragante ──────────────────────────────────────
+// Cada celda se colorea según el tragante terminal al que drena su cadena
+// de receptores D8 (calculado sobre el DEM excavado). Click en un tragante
+// resalta su subcuenca.
+const SUBCATCHMENT_COLORS = (HYDROLOGY.sink_ids || []).map((_, index) => {{
+  const color = new THREE.Color();
+  color.setHSL(((index * 137.508) % 360) / 360, 0.62, 0.55);
+  return color;
+}});
+
+(function buildSubcatchmentLayer() {{
+  if (!HYDROLOGY.sink_assignment || !HYDROLOGY.sink_assignment.length) return;
+  const HNX = HYDROLOGY.nx || DEM.nx;
+  const HNY = HYDROLOGY.ny || DEM.ny;
+  const geo = new THREE.PlaneGeometry(DEM.widthM, DEM.heightM, HNX - 1, HNY - 1);
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 4);
+  for (let i = 0; i < pos.count; i++) {{
+    const wx = pos.getX(i);
+    const wz = -pos.getY(i);
+    pos.setZ(i, sampleTerrainHeight(wx, wz) + 0.80);
+  }}
+  pos.needsUpdate = true;
+  subcatchmentColorAttr = new THREE.BufferAttribute(colors, 4);
+  geo.setAttribute('color', subcatchmentColorAttr);
+  const mat = new THREE.MeshBasicMaterial({{
+    vertexColors: true,
+    transparent: true,
+    opacity: 1.0,
+    alphaTest: 0.01,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  }});
+  const overlay = new THREE.Mesh(geo, mat);
+  overlay.rotation.x = -Math.PI / 2;
+  overlay.renderOrder = 2;
+  subcatchmentLayer.add(overlay);
+  rebuildSubcatchments();
+}})();
+
+function rebuildSubcatchments() {{
+  if (!subcatchmentColorAttr || !HYDROLOGY.sink_assignment) return;
+  const assign = HYDROLOGY.sink_assignment;
+  const colors = subcatchmentColorAttr.array;
+  const selectedIdx = (selectedNodeId && HYDROLOGY.sink_ids)
+    ? HYDROLOGY.sink_ids.indexOf(selectedNodeId)
+    : -1;
+  for (let i = 0; i < assign.length; i++) {{
+    const sinkIdx = assign[i];
+    const offset = i * 4;
+    if (sinkIdx < 0 || sinkIdx >= SUBCATCHMENT_COLORS.length) {{
+      colors[offset + 3] = 0;
+      continue;
+    }}
+    const color = SUBCATCHMENT_COLORS[sinkIdx];
+    colors[offset + 0] = color.r;
+    colors[offset + 1] = color.g;
+    colors[offset + 2] = color.b;
+    colors[offset + 3] = selectedIdx < 0 ? 0.42 : (sinkIdx === selectedIdx ? 0.82 : 0.06);
+  }}
+  subcatchmentColorAttr.needsUpdate = true;
+}}
+
 function infiltrationGradientColor(value) {{
   const t = clamp(value, 0, 1);
   const low = [128, 50, 44];
@@ -4829,6 +6079,7 @@ function rebuildInfiltrationLayer() {{
   buildRasterOverlay(vegetationLayer, SURFACE.vegetation, 'vegetation', 1.05, 2.4);
   rebuildInfiltrationLayer();
 }})();
+initScenarioPanel();
 
 const gridSize = Math.max(DEM.widthM, DEM.heightM) * 1.2;
 const grid = new THREE.GridHelper(gridSize, 20, 0x223344, 0x112233);
@@ -4990,6 +6241,8 @@ buildStreetOverlay();
 
 rebuildHydraulicLinks();
 
+const nodeMeshes = [];
+const nodeMeshById = {{}};
 for (const node of HYDRAULIC_NODES) {{
   let color = 0xffffff;
   if (node.kind === 'tragante') color = 0xff9f1c;
@@ -4997,16 +6250,20 @@ for (const node of HYDRAULIC_NODES) {{
   else if (node.kind === 'crp') color = 0x2f7de1;
 
   const radius = node.kind === 'tragante' ? 2.6 : 2.1;
+  const baseEmissive = node.capture > 0 ? 0x102010 : 0x000000;
   const sphere = new THREE.Mesh(
     new THREE.SphereGeometry(radius, 14, 12),
     new THREE.MeshStandardMaterial({{
       color: color,
-      emissive: node.capture > 0 ? 0x102010 : 0x000000,
+      emissive: baseEmissive,
       roughness: 0.4,
       metalness: 0.1,
     }})
   );
   sphere.position.set(node.x, node.y, node.z);
+  sphere.userData = {{ nodeId: node.id, node: node, baseColor: color, baseEmissive: baseEmissive }};
+  nodeMeshes.push(sphere);
+  nodeMeshById[node.id] = sphere;
   hydraulicNodeLayer.add(sphere);
 
   if (node.qa && node.qa.length) {{
@@ -5169,13 +6426,876 @@ window.addEventListener('resize', () => {{
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  drawNetwork2d();
 }});
+
+// ═══════════════════════════════════════════════════════════════
+//  SIMULACIÓN DE LLUVIA (timeline + partículas + valores por tragante)
+// ═══════════════════════════════════════════════════════════════
+const nodeInfoPanel = document.getElementById('node-info');
+const simTimelineBar = document.getElementById('sim-timeline');
+const simPlayBtn = document.getElementById('sim-play-btn');
+const simTimeRange = document.getElementById('sim-time-range');
+const simTimeLabel = document.getElementById('sim-time-label');
+const simSpeedSelect = document.getElementById('sim-speed');
+const simRainLabel = document.getElementById('sim-rain-label');
+const runSimulationBtn = document.getElementById('run-simulation-btn');
+
+const simClock = new THREE.Clock();
+let simStartMs = NaN;
+const simState = {{
+  frames: null,       // respuesta de /api/simulation/run
+  timeMin: 0,         // tiempo simulado actual (min)
+  playing: false,
+  speed: 5,           // minutos simulados por segundo real
+  frameIdx: -1,
+  nodeIndex: {{}},
+  maxNodeInflow: 0,
+}};
+
+const network2dPanel = document.getElementById('network2d-panel');
+const network2dCanvas = document.getElementById('network2d-canvas');
+const network2dCtx = network2dCanvas ? network2dCanvas.getContext('2d') : null;
+const network2dCloseBtn = document.getElementById('network2d-close-btn');
+const network2dFitBtn = document.getElementById('network2d-fit-btn');
+const network2dRunBtn = document.getElementById('network2d-run-btn');
+const network2dPlayBtn = document.getElementById('network2d-play-btn');
+const network2dTimeRange = document.getElementById('network2d-time-range');
+const network2dTimeLabel = document.getElementById('network2d-time-label');
+const network2dSpeedSelect = document.getElementById('network2d-speed');
+const network2dZoomOutBtn = document.getElementById('network2d-zoom-out-btn');
+const network2dZoomInBtn = document.getElementById('network2d-zoom-in-btn');
+const network2dFocusBtn = document.getElementById('network2d-focus-btn');
+const network2dMetrics = {{
+  node: document.getElementById('network2d-node'),
+  status: document.getElementById('network2d-status'),
+  fill: document.getElementById('network2d-fill'),
+  depth: document.getElementById('network2d-depth'),
+  flow: document.getElementById('network2d-flow'),
+  flood: document.getElementById('network2d-flood'),
+}};
+const network2dState = {{
+  bounds: null,
+  nodePositions: new Map(),
+  zoom: 1,
+  panX: 0,
+  panY: 0,
+  drag: null,
+  panelDrag: null,
+}};
+const NETWORK2D_MIN_ZOOM = 0.45;
+const NETWORK2D_MAX_ZOOM = 10;
+
+function showNetwork2dPanel() {{
+  if (!network2dPanel) return;
+  network2dPanel.classList.remove('ui-hidden');
+  if (selectedNodeId) focusNetwork2dNode(selectedNodeId, {{ keepZoom: true }});
+  else drawNetwork2d();
+}}
+
+function toggleNetwork2dPanel(force) {{
+  if (!network2dPanel) return;
+  const shouldShow = force === undefined ? network2dPanel.classList.contains('ui-hidden') : !!force;
+  network2dPanel.classList.toggle('ui-hidden', !shouldShow);
+  if (shouldShow) {{
+    if (selectedNodeId) focusNetwork2dNode(selectedNodeId, {{ keepZoom: true }});
+    else drawNetwork2d();
+  }}
+}}
+
+function computeNetwork2dBounds() {{
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  const add = (x, z) => {{
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+  }};
+  for (const node of HYDRAULIC_NODES || []) add(node.x, node.z);
+  for (const link of HYDRAULIC_LINKS || []) {{
+    for (const p of link.points || []) add(p[0], p[2]);
+  }}
+  if (!Number.isFinite(minX)) {{
+    minX = -1; maxX = 1; minZ = -1; maxZ = 1;
+  }}
+  const padX = Math.max(30, (maxX - minX) * 0.04);
+  const padZ = Math.max(30, (maxZ - minZ) * 0.04);
+  return {{ minX: minX - padX, maxX: maxX + padX, minZ: minZ - padZ, maxZ: maxZ + padZ }};
+}}
+
+function ensureNetwork2dCanvasSize() {{
+  if (!network2dCanvas || !network2dCtx) return null;
+  const rect = network2dCanvas.getBoundingClientRect();
+  const width = Math.max(240, rect.width || 360);
+  const height = Math.max(160, rect.height || 220);
+  const dpr = window.devicePixelRatio || 1;
+  const pixelW = Math.round(width * dpr);
+  const pixelH = Math.round(height * dpr);
+  if (network2dCanvas.width !== pixelW || network2dCanvas.height !== pixelH) {{
+    network2dCanvas.width = pixelW;
+    network2dCanvas.height = pixelH;
+  }}
+  network2dCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return {{ width, height }};
+}}
+
+function resetNetwork2dView() {{
+  network2dState.bounds = computeNetwork2dBounds();
+  network2dState.zoom = 1;
+  network2dState.panX = 0;
+  network2dState.panY = 0;
+  drawNetwork2d();
+}}
+
+function network2dBasePoint(x, z, dims) {{
+  const b = network2dState.bounds || computeNetwork2dBounds();
+  const spanX = Math.max(1, b.maxX - b.minX);
+  const spanZ = Math.max(1, b.maxZ - b.minZ);
+  const pad = 16;
+  const scale = Math.min((dims.width - pad * 2) / spanX, (dims.height - pad * 2) / spanZ);
+  const usedW = spanX * scale;
+  const usedH = spanZ * scale;
+  const ox = (dims.width - usedW) / 2;
+  const oy = (dims.height - usedH) / 2;
+  return {{
+    x: ox + (x - b.minX) * scale,
+    y: oy + (z - b.minZ) * scale,
+  }};
+}}
+
+function projectNetwork2d(x, z, dims) {{
+  const base = network2dBasePoint(x, z, dims);
+  const cx = dims.width / 2;
+  const cy = dims.height / 2;
+  return {{
+    x: cx + (base.x - cx) * network2dState.zoom + network2dState.panX,
+    y: cy + (base.y - cy) * network2dState.zoom + network2dState.panY,
+  }};
+}}
+
+function zoomNetwork2dAt(clientX, clientY, factor) {{
+  const dims = ensureNetwork2dCanvasSize();
+  if (!dims || !network2dCanvas) return;
+  const rect = network2dCanvas.getBoundingClientRect();
+  const sx = clientX - rect.left;
+  const sy = clientY - rect.top;
+  const cx = dims.width / 2;
+  const cy = dims.height / 2;
+  const oldZoom = network2dState.zoom;
+  const nextZoom = clamp(oldZoom * factor, NETWORK2D_MIN_ZOOM, NETWORK2D_MAX_ZOOM);
+  if (Math.abs(nextZoom - oldZoom) < 0.001) return;
+  const ratio = nextZoom / oldZoom;
+  network2dState.panX = sx - cx - (sx - network2dState.panX - cx) * ratio;
+  network2dState.panY = sy - cy - (sy - network2dState.panY - cy) * ratio;
+  network2dState.zoom = nextZoom;
+  drawNetwork2d();
+}}
+
+function panNetwork2d(dx, dy) {{
+  network2dState.panX += dx;
+  network2dState.panY += dy;
+  drawNetwork2d();
+}}
+
+function focusNetwork2dNode(nodeId, options) {{
+  if (!nodeId || !network2dCanvas || (network2dPanel && network2dPanel.classList.contains('ui-hidden'))) return;
+  const node = HYDRAULIC_NODES.find(n => n.id === nodeId);
+  const dims = ensureNetwork2dCanvasSize();
+  if (!node || !dims) return;
+  if (!network2dState.bounds) network2dState.bounds = computeNetwork2dBounds();
+  const keepZoom = options && options.keepZoom;
+  if (!keepZoom && network2dState.zoom < 2.2) network2dState.zoom = 2.2;
+  const base = network2dBasePoint(node.x, node.z, dims);
+  const cx = dims.width / 2;
+  const cy = dims.height / 2;
+  network2dState.panX = cx - (cx + (base.x - cx) * network2dState.zoom);
+  network2dState.panY = cy - (cy + (base.y - cy) * network2dState.zoom);
+  drawNetwork2d();
+}}
+
+function indexSimulationNodes(frames) {{
+  const index = {{}};
+  let maxFlow = 0;
+  for (const [nodeId, entry] of Object.entries((frames && frames.nodes) || {{}})) {{
+    index[nodeId] = entry;
+    if (entry.swmm_node) index[entry.swmm_node] = entry;
+    for (const flow of entry.inflow_m3s || []) {{
+      maxFlow = Math.max(maxFlow, Number(flow) || 0);
+    }}
+  }}
+  simState.nodeIndex = index;
+  simState.maxNodeInflow = maxFlow;
+}}
+
+function network2dEntryForNode(node) {{
+  if (!node || !simState.nodeIndex) return null;
+  return simState.nodeIndex[node.id] || null;
+}}
+
+function network2dValueAt(series, k, fallback=0) {{
+  if (!series || !Array.isArray(series)) return fallback;
+  const idx = clamp(k, 0, Math.max(0, series.length - 1));
+  const value = Number(series[idx]);
+  return Number.isFinite(value) ? value : fallback;
+}}
+
+function network2dStateForNode(node, k) {{
+  const entry = network2dEntryForNode(node);
+  const base = {{ entry, fill: 0, depth: 0, inflow: 0, flooding: 0, status: 'sin datos', color: '#536776' }};
+  if (!entry) return base;
+  const inflow = network2dValueAt(entry.inflow_m3s, k, 0);
+  const status = entry.status && entry.status[k] ? entry.status[k] : entry.source;
+  if (entry.depth_m) {{
+    const depth = network2dValueAt(entry.depth_m, k, 0);
+    const flooding = network2dValueAt(entry.flooding_m3s, k, 0);
+    const nodeDepth = Math.max(0.05, Number(node.depth) || 1.0);
+    const fill = clamp(depth / nodeDepth, 0, 1.5);
+    let color = '#2f7de1';
+    if (flooding > 0 || status === 'flooded') color = '#ff2d2d';
+    else if (fill >= 1.0) color = '#ff5c2f';
+    else if (fill >= 0.75) color = '#f4c542';
+    else if (fill >= 0.35) color = '#35c87a';
+    else if (fill <= 0.03) color = '#5a7180';
+    return {{ entry, fill, depth, inflow, flooding, status, color }};
+  }}
+  const flowRatio = simState.maxNodeInflow > 0 ? clamp(inflow / simState.maxNodeInflow, 0, 1) : 0;
+  const color = flowRatio > 0.05 ? '#39c7ff' : '#5a7180';
+  return {{ entry, fill: flowRatio, depth: 0, inflow, flooding: 0, status, color }};
+}}
+
+function network2dCriticalNode(k) {{
+  let best = null;
+  let bestScore = -1;
+  for (const node of HYDRAULIC_NODES || []) {{
+    const state = network2dStateForNode(node, k);
+    const score = state.flooding > 0 ? 10 + state.flooding : state.fill + state.inflow * 0.2;
+    if (score > bestScore) {{
+      bestScore = score;
+      best = node;
+    }}
+  }}
+  return best;
+}}
+
+function updateNetwork2dMetrics() {{
+  if (!network2dPanel || network2dPanel.classList.contains('ui-hidden')) return;
+  const k = Math.max(0, simState.frameIdx);
+  const node = (selectedNodeId && HYDRAULIC_NODES.find(n => n.id === selectedNodeId)) || network2dCriticalNode(k);
+  if (!node) return;
+  const state = network2dStateForNode(node, k);
+  const fillPct = state.entry && state.entry.depth_m ? Math.round(clamp(state.fill, 0, 1.5) * 100) + '%' : 'n/a';
+  if (network2dMetrics.node) network2dMetrics.node.textContent = node.id;
+  if (network2dMetrics.status) network2dMetrics.status.textContent = NODE_STATUS_LABELS[state.status] || state.status || '--';
+  if (network2dMetrics.fill) network2dMetrics.fill.textContent = fillPct;
+  if (network2dMetrics.depth) network2dMetrics.depth.textContent = state.entry && state.entry.depth_m ? state.depth.toFixed(2) + ' m' : '--';
+  if (network2dMetrics.flow) network2dMetrics.flow.textContent = fmtFlowLs(state.inflow);
+  if (network2dMetrics.flood) network2dMetrics.flood.textContent = fmtFlowLs(state.flooding);
+}}
+
+function drawNetwork2d() {{
+  if (!network2dPanel || network2dPanel.classList.contains('ui-hidden') || !network2dCtx) return;
+  const dims = ensureNetwork2dCanvasSize();
+  if (!dims) return;
+  if (!network2dState.bounds) network2dState.bounds = computeNetwork2dBounds();
+  network2dState.nodePositions.clear();
+  const ctx = network2dCtx;
+  ctx.clearRect(0, 0, dims.width, dims.height);
+  ctx.fillStyle = '#071018';
+  ctx.fillRect(0, 0, dims.width, dims.height);
+  ctx.strokeStyle = 'rgba(120,180,210,0.10)';
+  ctx.lineWidth = 1;
+  for (let x = 0; x < dims.width; x += 36) {{
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, dims.height); ctx.stroke();
+  }}
+  for (let y = 0; y < dims.height; y += 36) {{
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(dims.width, y); ctx.stroke();
+  }}
+
+  const k = Math.max(0, simState.frameIdx);
+  for (const link of HYDRAULIC_LINKS || []) {{
+    const pts = link.points || [];
+    if (pts.length < 2) continue;
+    const srcNode = link.source_id ? HYDRAULIC_NODES.find(n => n.id === link.source_id) : null;
+    const dstNode = link.target_id ? HYDRAULIC_NODES.find(n => n.id === link.target_id) : null;
+    const srcState = srcNode ? network2dStateForNode(srcNode, k) : null;
+    const dstState = dstNode ? network2dStateForNode(dstNode, k) : null;
+    const fill = Math.max(srcState ? srcState.fill : 0, dstState ? dstState.fill : 0);
+    const flooding = Math.max(srcState ? srcState.flooding : 0, dstState ? dstState.flooding : 0);
+    ctx.strokeStyle = flooding > 0
+      ? 'rgba(255,45,45,0.92)'
+      : (fill > 0.7 ? 'rgba(244,197,66,0.82)' : (fill > 0.2 ? 'rgba(70,190,220,0.58)' : 'rgba(120,150,165,0.30)'));
+    ctx.lineWidth = flooding > 0 ? 2.6 : (fill > 0.6 ? 2.0 : 1.15);
+    ctx.beginPath();
+    pts.forEach((p, idx) => {{
+      const q = projectNetwork2d(p[0], p[2], dims);
+      if (idx === 0) ctx.moveTo(q.x, q.y);
+      else ctx.lineTo(q.x, q.y);
+    }});
+    ctx.stroke();
+  }}
+
+  for (const node of HYDRAULIC_NODES || []) {{
+    const p = projectNetwork2d(node.x, node.z, dims);
+    network2dState.nodePositions.set(node.id, p);
+    const state = network2dStateForNode(node, k);
+    const selected = selectedNodeId === node.id;
+    const radius = selected ? 6.2 : (node.kind === 'tragante' ? 4.4 : 3.6);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, radius + Math.min(3, state.fill * 2.5), 0, Math.PI * 2);
+    ctx.fillStyle = state.color;
+    ctx.globalAlpha = state.entry ? 0.96 : 0.52;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = selected ? 2.4 : 1;
+    ctx.strokeStyle = selected ? '#ffffff' : 'rgba(230,250,255,0.55)';
+    ctx.stroke();
+  }}
+
+  updateNetwork2dMetrics();
+}}
+
+function findNetwork2dNodeAt(clientX, clientY) {{
+  if (!network2dCanvas) return null;
+  const rect = network2dCanvas.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  const dims = ensureNetwork2dCanvasSize();
+  if (!dims) return null;
+  let best = null;
+  let bestDist = 12;
+  for (const node of HYDRAULIC_NODES || []) {{
+    const p = network2dState.nodePositions.get(node.id) || projectNetwork2d(node.x, node.z, dims);
+    const dist = Math.hypot(p.x - x, p.y - y);
+    if (dist < bestDist) {{
+      bestDist = dist;
+      best = node;
+    }}
+  }}
+  return best;
+}}
+
+if (network2dCloseBtn) network2dCloseBtn.addEventListener('click', () => toggleNetwork2dPanel(false));
+if (network2dFitBtn) network2dFitBtn.addEventListener('click', () => {{
+  resetNetwork2dView();
+}});
+if (network2dZoomOutBtn) network2dZoomOutBtn.addEventListener('click', () => {{
+  const rect = network2dCanvas ? network2dCanvas.getBoundingClientRect() : null;
+  if (rect) zoomNetwork2dAt(rect.left + rect.width / 2, rect.top + rect.height / 2, 1 / 1.25);
+}});
+if (network2dZoomInBtn) network2dZoomInBtn.addEventListener('click', () => {{
+  const rect = network2dCanvas ? network2dCanvas.getBoundingClientRect() : null;
+  if (rect) zoomNetwork2dAt(rect.left + rect.width / 2, rect.top + rect.height / 2, 1.25);
+}});
+if (network2dFocusBtn) network2dFocusBtn.addEventListener('click', () => {{
+  if (selectedNodeId) focusNetwork2dNode(selectedNodeId);
+}});
+if (network2dPanel) {{
+  const panelHead = network2dPanel.querySelector('.network2d-head');
+  if (panelHead) {{
+    panelHead.addEventListener('pointerdown', (event) => {{
+      if (event.target && event.target.closest && event.target.closest('button')) return;
+      const rect = network2dPanel.getBoundingClientRect();
+      network2dState.panelDrag = {{
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      }};
+      panelHead.setPointerCapture(event.pointerId);
+    }});
+    panelHead.addEventListener('pointermove', (event) => {{
+      const drag = network2dState.panelDrag;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const nextLeft = clamp(drag.left + event.clientX - drag.startX, 8, Math.max(8, window.innerWidth - drag.width - 8));
+      const nextTop = clamp(drag.top + event.clientY - drag.startY, 8, Math.max(8, window.innerHeight - drag.height - 8));
+      network2dPanel.style.left = nextLeft + 'px';
+      network2dPanel.style.top = nextTop + 'px';
+      network2dPanel.style.right = 'auto';
+      network2dPanel.style.bottom = 'auto';
+    }});
+    const stopPanelDrag = (event) => {{
+      const drag = network2dState.panelDrag;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      network2dState.panelDrag = null;
+      try {{ panelHead.releasePointerCapture(event.pointerId); }} catch (_err) {{}}
+    }};
+    panelHead.addEventListener('pointerup', stopPanelDrag);
+    panelHead.addEventListener('pointercancel', stopPanelDrag);
+  }}
+}}
+if (network2dCanvas) {{
+  network2dCanvas.addEventListener('wheel', (event) => {{
+    event.preventDefault();
+    zoomNetwork2dAt(event.clientX, event.clientY, event.deltaY < 0 ? 1.18 : 1 / 1.18);
+  }}, {{ passive: false }});
+  network2dCanvas.addEventListener('pointerdown', (event) => {{
+    if (event.button !== 0) return;
+    network2dState.drag = {{
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      moved: false,
+    }};
+    network2dCanvas.classList.add('is-panning');
+    network2dCanvas.setPointerCapture(event.pointerId);
+  }});
+  network2dCanvas.addEventListener('pointermove', (event) => {{
+    const drag = network2dState.drag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.lastX;
+    const dy = event.clientY - drag.lastY;
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+    if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 3) drag.moved = true;
+    if (dx || dy) panNetwork2d(dx, dy);
+  }});
+  const stopCanvasDrag = (event) => {{
+    const drag = network2dState.drag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    network2dState.drag = null;
+    network2dCanvas.classList.remove('is-panning');
+    try {{ network2dCanvas.releasePointerCapture(event.pointerId); }} catch (_err) {{}}
+    if (!drag.moved) {{
+      const node = findNetwork2dNodeAt(event.clientX, event.clientY);
+      if (node) selectNode(node.id, {{ focus3d: true, focus2d: true }});
+    }}
+  }};
+  network2dCanvas.addEventListener('pointerup', stopCanvasDrag);
+  network2dCanvas.addEventListener('pointercancel', stopCanvasDrag);
+}}
+
+// ── Lluvia con partículas ────────────────────────────────────────
+const RAIN_MAX_DROPS = 15000;
+let rainPoints = null;
+let rainVelocities = null;
+let rainGroundY = null;
+let rainTopY = 0;
+let rainActiveDrops = 0;
+
+function respawnDrop(i, positions, randomY) {{
+  const x = (Math.random() - 0.5) * DEM.widthM;
+  const z = (Math.random() - 0.5) * DEM.heightM;
+  const ground = sampleTerrainHeight(x, z);
+  positions[i * 3] = x;
+  positions[i * 3 + 1] = randomY ? ground + Math.random() * (rainTopY - ground) : rainTopY;
+  positions[i * 3 + 2] = z;
+  rainGroundY[i] = ground;
+  rainVelocities[i] = 100 + Math.random() * 60;
+}}
+
+function buildRainSystem() {{
+  if (rainPoints) return;
+  rainTopY = DEM.zMax + 260;
+  const positions = new Float32Array(RAIN_MAX_DROPS * 3);
+  rainVelocities = new Float32Array(RAIN_MAX_DROPS);
+  rainGroundY = new Float32Array(RAIN_MAX_DROPS);
+  for (let i = 0; i < RAIN_MAX_DROPS; i++) respawnDrop(i, positions, true);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setDrawRange(0, 0);
+  const mat = new THREE.PointsMaterial({{
+    color: 0x9fc8ff,
+    size: 1.7,
+    transparent: true,
+    opacity: 0.55,
+    sizeAttenuation: true,
+    depthWrite: false,
+  }});
+  rainPoints = new THREE.Points(geo, mat);
+  rainPoints.frustumCulled = false;
+  rainPoints.renderOrder = 30;
+  rainPoints.visible = false;
+  scene.add(rainPoints);
+}}
+
+function setRainIntensityRatio(ratio) {{
+  if (!rainPoints) return;
+  rainActiveDrops = Math.round(clamp(ratio, 0, 1) * RAIN_MAX_DROPS);
+  rainPoints.geometry.setDrawRange(0, rainActiveDrops);
+  rainPoints.visible = rainActiveDrops > 0;
+}}
+
+function updateRainParticles(dt) {{
+  if (!rainPoints || !rainPoints.visible || rainActiveDrops <= 0) return;
+  const attr = rainPoints.geometry.attributes.position;
+  const positions = attr.array;
+  for (let i = 0; i < rainActiveDrops; i++) {{
+    positions[i * 3 + 1] -= rainVelocities[i] * dt;
+    if (positions[i * 3 + 1] <= rainGroundY[i]) respawnDrop(i, positions, false);
+  }}
+  attr.needsUpdate = true;
+}}
+
+// ── Click sobre tragantes / nodos hidráulicos ────────────────────
+// Selección en espacio de pantalla: las esferas son pequeñas a escala urbana,
+// así que se elige el nodo proyectado más cercano al puntero (< 16 px).
+let simPointerDown = null;
+renderer.domElement.addEventListener('pointerdown', (event) => {{
+  simPointerDown = [event.clientX, event.clientY];
+}});
+renderer.domElement.addEventListener('pointerup', (event) => {{
+  if (!simPointerDown) return;
+  const moved = Math.hypot(event.clientX - simPointerDown[0], event.clientY - simPointerDown[1]);
+  simPointerDown = null;
+  if (moved > 5 || event.button !== 0) return;  // fue arrastre de cámara
+  handleNodeClick(event);
+}});
+
+function handleNodeClick(event) {{
+  if (!hydraulicNodeLayer.visible || !nodeMeshes.length) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const px = event.clientX - rect.left;
+  const py = event.clientY - rect.top;
+  const projected = new THREE.Vector3();
+  let best = null;
+  let bestDist = 16;
+  for (const mesh of nodeMeshes) {{
+    projected.copy(mesh.position).project(camera);
+    if (projected.z > 1 || projected.z < -1) continue;
+    const sx = (projected.x + 1) / 2 * rect.width;
+    const sy = (-projected.y + 1) / 2 * rect.height;
+    const dist = Math.hypot(sx - px, sy - py);
+    if (dist < bestDist) {{
+      bestDist = dist;
+      best = mesh;
+    }}
+  }}
+  selectNode(best ? best.userData.nodeId : null, {{ focus3d: false, focus2d: true }});
+}}
+
+function focus3dNode(nodeId) {{
+  const mesh = nodeId && nodeMeshById[nodeId];
+  if (!mesh) return;
+  const target = mesh.position.clone();
+  const offset = camera.position.clone().sub(controls.target);
+  const distance = clamp(offset.length() * 0.45, 180, 850);
+  const direction = offset.length() > 1
+    ? offset.normalize()
+    : new THREE.Vector3(0, 0.45, 1).normalize();
+  controls.target.copy(target);
+  camera.position.copy(target).add(direction.multiplyScalar(distance));
+  controls.update();
+}}
+
+function selectNode(nodeId, options) {{
+  options = options || {{}};
+  const prev = selectedNodeId && nodeMeshById[selectedNodeId];
+  if (prev) prev.scale.setScalar(1);
+  selectedNodeId = nodeId;
+  const mesh = nodeId && nodeMeshById[nodeId];
+  if (mesh) mesh.scale.setScalar(1.6);
+  if (nodeId && options.focus3d) focus3dNode(nodeId);
+  if (nodeId && options.focus2d !== false) focusNetwork2dNode(nodeId);
+  updateNodeInfoPanel();
+  rebuildSubcatchments();
+  drawNetwork2d();
+}}
+
+const NODE_KIND_LABELS = {{ tragante: 'Tragante', crp: 'CRP', crn: 'CRN' }};
+const NODE_STATUS_LABELS = {{
+  flooded: 'Inundado',
+  normal: 'Normal',
+  hydrology_only: 'Solo hidrología',
+}};
+
+function fmtFlowLs(value) {{
+  if (value === null || value === undefined) return '—';
+  return (value * 1000).toFixed(1) + ' L/s';
+}}
+
+function nodeMetricRow(label, value) {{
+  return '<div class="node-metric"><span>' + label + '</span><strong>' + value + '</strong></div>';
+}}
+
+function updateNodeInfoPanel() {{
+  if (!nodeInfoPanel) return;
+  const nodeId = selectedNodeId;
+  const mesh = nodeId && nodeMeshById[nodeId];
+  if (!mesh) {{
+    nodeInfoPanel.classList.add('ui-hidden');
+    return;
+  }}
+  const node = mesh.userData.node || {{}};
+  const kindLabel = NODE_KIND_LABELS[node.kind] || (node.kind || 'Nodo');
+  let html = '<h4><span>' + kindLabel + ' ' + nodeId +
+    '</span><button type="button" class="node-close" title="Cerrar">✕</button></h4>';
+  if (node.terrain !== null && node.terrain !== undefined) {{
+    html += nodeMetricRow('Terreno', node.terrain.toFixed(1) + ' m');
+  }}
+  if (node.depth !== null && node.depth !== undefined) {{
+    html += nodeMetricRow('Profundidad', node.depth.toFixed(2) + ' m');
+  }}
+  if (node.capture) {{
+    html += nodeMetricRow('Carga acumulación', String(node.capture));
+  }}
+  if (HYDROLOGY.sink_areas && HYDROLOGY.sink_areas[nodeId] !== undefined) {{
+    html += nodeMetricRow('Área tributaria',
+      Math.round(HYDROLOGY.sink_areas[nodeId]).toLocaleString() + ' m²');
+  }}
+
+  const frames = simState.frames;
+  const entry = frames && frames.nodes && frames.nodes[nodeId];
+  if (entry) {{
+    const k = Math.max(0, simState.frameIdx);
+    const status = entry.status ? entry.status[k] : null;
+    const statusLabel = NODE_STATUS_LABELS[status] || status || '—';
+    const statusClass = status === 'flooded' ? 'node-status-flooded' : 'node-status-normal';
+    html += '<hr style="border-color:rgba(100,180,255,0.2);margin:6px 0">';
+    html += nodeMetricRow('Caudal entrada', fmtFlowLs(entry.inflow_m3s ? entry.inflow_m3s[k] : null));
+    if (entry.depth_m) html += nodeMetricRow('Nivel', entry.depth_m[k].toFixed(2) + ' m');
+    if (entry.flooding_m3s) html += nodeMetricRow('Inundación', fmtFlowLs(entry.flooding_m3s[k]));
+    html += nodeMetricRow('Estado', '<span class="' + statusClass + '">' + statusLabel + '</span>');
+    html += '<div class="node-source">' +
+      (entry.source === 'swmm' ? 'Datos: SWMM (' + (entry.swmm_node || '') + ')' : 'Datos: hidrología superficial') +
+      '</div>';
+  }} else if (frames) {{
+    html += '<div class="node-source">Sin datos de simulación para este nodo</div>';
+  }} else {{
+    html += '<div class="node-source">Ejecute «Simular lluvia» para ver valores en el tiempo</div>';
+  }}
+  nodeInfoPanel.innerHTML = html;
+  nodeInfoPanel.classList.remove('ui-hidden');
+}}
+
+if (nodeInfoPanel) {{
+  nodeInfoPanel.addEventListener('click', (event) => {{
+    if (event.target && event.target.classList.contains('node-close')) selectNode(null);
+  }});
+}}
+
+// ── Ejecución y reproducción de la simulación ────────────────────
+function runSimulation() {{
+  const config = readScenarioControls();
+  setScenarioStatus('Ejecutando simulación de lluvia (puede tardar)...');
+  if (runSimulationBtn) runSimulationBtn.disabled = true;
+  if (network2dRunBtn) network2dRunBtn.disabled = true;
+  return fetch(scenarioApiBase() + '/api/simulation/run', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify(config),
+  }})
+    .then(async (response) => {{
+      if (!response.ok) {{
+        let detail = 'HTTP ' + response.status;
+        try {{
+          const body = await response.json();
+          if (body && body.detail) detail = body.detail;
+        }} catch (err) {{}}
+        throw new Error(detail);
+      }}
+      return response.json();
+    }})
+    .then((frames) => {{
+      loadSimulationFrames(frames);
+      if (frames.swmm_available) setScenarioStatus('Simulación lista (hidrología + SWMM)');
+      else setScenarioStatus('Simulación lista (solo hidrología superficial): ' + (frames.swmm_error || ''));
+    }})
+    .catch((err) => setScenarioStatus('Simulación falló: ' + err.message, true))
+    .finally(() => {{
+      if (runSimulationBtn) runSimulationBtn.disabled = false;
+      if (network2dRunBtn) network2dRunBtn.disabled = false;
+    }});
+}}
+
+function loadSimulationFrames(frames) {{
+  simState.frames = frames;
+  simState.frameIdx = -1;
+  simState.timeMin = 0;
+  indexSimulationNodes(frames);
+  simStartMs = Date.parse(frames.start_time);
+  buildRainSystem();
+  if (simTimeRange) {{
+    simTimeRange.min = '0';
+    simTimeRange.max = String(frames.duration_min);
+    simTimeRange.step = 'any';
+    simTimeRange.value = '0';
+  }}
+  if (network2dTimeRange) {{
+    network2dTimeRange.min = '0';
+    network2dTimeRange.max = String(frames.duration_min);
+    network2dTimeRange.step = 'any';
+    network2dTimeRange.value = '0';
+    network2dTimeRange.disabled = false;
+  }}
+  // Encender acumulación (el agua) y flechas (dirección del flujo sobre el
+  // agua) para la reproducción.
+  if (!viewerState.flowArrows) {{
+    // Al auto-encender las flechas, densidad baja para no saturar la escena
+    // (el usuario puede subirla en el panel de Capas).
+    viewerState.arrowDensity = Math.min(viewerState.arrowDensity, 2);
+  }}
+  if (uiToggles.flowAccum) uiToggles.flowAccum.checked = true;
+  if (uiToggles.flowArrows) uiToggles.flowArrows.checked = true;
+  viewerState.flowAccum = true;
+  viewerState.flowArrows = true;
+  applyViewerState();
+  syncLayerPanel();
+  if (simTimelineBar) simTimelineBar.classList.remove('ui-hidden');
+  showNetwork2dPanel();
+  applyFrameForTime(0, true);
+  setSimPlaying(true);
+}}
+
+function applyFrameForTime(t, force) {{
+  const frames = simState.frames;
+  if (!frames || !frames.times_min || !frames.times_min.length) return;
+  const k = clamp(Math.floor(t / frames.step_min + 1e-6), 0, frames.times_min.length - 1);
+  if (force || k !== simState.frameIdx) {{
+    simState.frameIdx = k;
+    applyFrame(k);
+  }}
+  updateSimTimeUI(t);
+}}
+
+function applyFrame(k) {{
+  const frames = simState.frames;
+  if (!frames) return;
+  const frameCount = frames.times_min ? frames.times_min.length : (frames.rain_mm_h ? frames.rain_mm_h.length : 0);
+  k = clamp(k, 0, Math.max(0, frameCount - 1));
+  simState.frameIdx = k;
+  const rainNow = frames.rain_mm_h[k] || 0;
+  setRainIntensityRatio(frames.max_rain_mm_h > 0 ? rainNow / frames.max_rain_mm_h : 0);
+  // wetness sube con la lluvia y decae en la cola de drenaje: el agua se
+  // retrae hacia los cauces y los tragantes se la "tragan".
+  const wetSeries = frames.wetness || frames.cum_rain_frac;
+  simWetFactor = wetSeries[k] || 0;
+  simThresholdActive = true;
+  rebuildFlowAccumulation();
+  updateSimArrowVisibility();
+  applyNodeStatuses(k);
+  drawNetwork2d();
+  updateNodeInfoPanel();
+  if (simRainLabel) simRainLabel.textContent = '🌧 ' + rainNow.toFixed(0) + ' mm/h';
+}}
+
+// Durante la simulación las flechas solo se muestran encima del agua
+// acumulada visible (mismo umbral que la capa de acumulación).
+function updateSimArrowVisibility() {{
+  if (!simThresholdActive) return;
+  const wet = clamp(simWetFactor, 0, 1);
+  const minValue = clamp(viewerState.flowRangeMin, 0, 0.99);
+  const effMin = lerp(0.85, minValue, wet);
+  for (const helper of flowArrowLayer.children) {{
+    const accumValue = helper.userData ? (helper.userData.accumValue || 0) : 0;
+    helper.visible = wet > 0.02 && accumValue >= effMin;
+  }}
+}}
+
+function applyNodeStatuses(k) {{
+  const frames = simState.frames;
+  if (!frames || !frames.nodes) return;
+  for (const mesh of nodeMeshes) {{
+    const state = network2dStateForNode(mesh.userData.node || {{}}, k);
+    if (state.entry) {{
+      mesh.material.color.set(state.color);
+      mesh.material.emissive.set(state.flooding > 0 ? '#551111' : mixHex(state.color, '#000000', 0.72));
+    }} else {{
+      mesh.material.color.setHex(mesh.userData.baseColor);
+      mesh.material.emissive.setHex(mesh.userData.baseEmissive);
+    }}
+  }}
+}}
+
+function formatSimTimeText(t) {{
+  let clock = '';
+  if (Number.isFinite(simStartMs)) {{
+    const date = new Date(simStartMs + t * 60000);
+    clock = String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0') + ' ';
+  }}
+  const total = simState.frames && Number.isFinite(Number(simState.frames.duration_min))
+    ? Number(simState.frames.duration_min)
+    : null;
+  if (total !== null) return clock + '(+' + Math.round(t) + ' / ' + Math.round(total) + ' min)';
+  return clock + '(+' + Math.round(t) + ' min)';
+}}
+
+function updateSimTimeUI(t) {{
+  if (simTimeRange && document.activeElement !== simTimeRange) {{
+    simTimeRange.value = String(t);
+  }}
+  if (network2dTimeRange && document.activeElement !== network2dTimeRange) {{
+    network2dTimeRange.value = String(t);
+  }}
+  const label = formatSimTimeText(t);
+  if (simTimeLabel) simTimeLabel.textContent = label;
+  if (network2dTimeLabel) network2dTimeLabel.textContent = label;
+}}
+
+function setSimulationSpeed(value) {{
+  simState.speed = Number(value) || 5;
+  if (simSpeedSelect && simSpeedSelect.value !== String(simState.speed)) simSpeedSelect.value = String(simState.speed);
+  if (network2dSpeedSelect && network2dSpeedSelect.value !== String(simState.speed)) network2dSpeedSelect.value = String(simState.speed);
+}}
+
+function setSimPlaying(playing) {{
+  if (playing && simState.frames && simState.timeMin >= simState.frames.duration_min - 1e-6) {{
+    simState.timeMin = 0;  // reiniciar al final
+  }}
+  simState.playing = !!playing && !!simState.frames;
+  if (simPlayBtn) simPlayBtn.textContent = simState.playing ? '⏸' : '▶';
+}}
+
+function syncPlaybackButtons() {{
+  if (simPlayBtn) simPlayBtn.textContent = simState.playing ? '||' : '>';
+  if (network2dPlayBtn) {{
+    network2dPlayBtn.textContent = simState.playing ? '||' : '>';
+    network2dPlayBtn.disabled = !simState.frames;
+  }}
+}}
+
+const baseSetSimPlaying = setSimPlaying;
+setSimPlaying = function(playing) {{
+  baseSetSimPlaying(playing);
+  syncPlaybackButtons();
+}};
+
+if (runSimulationBtn) runSimulationBtn.addEventListener('click', runSimulation);
+if (network2dRunBtn) network2dRunBtn.addEventListener('click', runSimulation);
+if (simPlayBtn) simPlayBtn.addEventListener('click', () => setSimPlaying(!simState.playing));
+if (network2dPlayBtn) network2dPlayBtn.addEventListener('click', () => setSimPlaying(!simState.playing));
+if (simSpeedSelect) {{
+  simSpeedSelect.addEventListener('change', () => {{
+    setSimulationSpeed(simSpeedSelect.value);
+  }});
+}}
+if (network2dSpeedSelect) {{
+  network2dSpeedSelect.addEventListener('change', () => {{
+    setSimulationSpeed(network2dSpeedSelect.value);
+  }});
+}}
+if (simTimeRange) {{
+  simTimeRange.addEventListener('input', () => {{
+    simState.timeMin = Number(simTimeRange.value) || 0;
+    applyFrameForTime(simState.timeMin, true);
+  }});
+}}
+if (network2dTimeRange) {{
+  network2dTimeRange.addEventListener('input', () => {{
+    simState.timeMin = Number(network2dTimeRange.value) || 0;
+    applyFrameForTime(simState.timeMin, true);
+  }});
+}}
+syncPlaybackButtons();
 
 // ═══════════════════════════════════════════════════════════════
 //  LOOP
 // ═══════════════════════════════════════════════════════════════
 function animate() {{
   requestAnimationFrame(animate);
+  const dt = Math.min(simClock.getDelta(), 0.1);
+  updateRainParticles(dt);
+  if (simState.playing && simState.frames) {{
+    simState.timeMin += dt * simState.speed;
+    if (simState.timeMin >= simState.frames.duration_min) {{
+      simState.timeMin = simState.frames.duration_min;
+      setSimPlaying(false);
+    }}
+    applyFrameForTime(simState.timeMin);
+  }}
   controls.update();
   renderer.render(scene, camera);
 }}
@@ -5212,6 +7332,11 @@ def main(street_depth=1.5, street_ramp=7.0, street_width=1.0,
     print("=" * 60)
     print("  Generador 3D Terreno – Cariari, Costa Rica")
     print("=" * 60)
+    print(
+        f"  Parametros terreno: calles {street_depth:.1f} m, "
+        f"borde {street_ramp:.1f} m, rio {river_depth:.1f} m, "
+        f"ancho rio {river_width:.1f} m"
+    )
     runoff_pct, _ = normalize_runoff_pct({
         "base": runoff_base_pct,
         "vegetation": runoff_vegetation_pct,
@@ -5431,10 +7556,10 @@ def main(street_depth=1.5, street_ramp=7.0, street_width=1.0,
     runoff_weight_hi = upsample_dem_numpy(surface_layers["runoff"], FLOW_RESOLUTION_SCALE)
 
     surface_sinks = [
-        {"id": item["id"], "lon": item["lon"], "lat": item["lat"]}
+        {"id": item["id"], "lon": item["lon"], "lat": item["lat"], "kind": item.get("kind", "tragante")}
         for item in hydraulic_structures if item["kind"] == "tragante"
     ] + [
-        {"id": item["id"], "lon": item["lon"], "lat": item["lat"]}
+        {"id": item["id"], "lon": item["lon"], "lat": item["lat"], "kind": item.get("kind", "desfogue")}
         for item in raw_drain_pts
     ]
     print(f"\n[6h2] Calculando hidrología fina ({ny_hi}×{nx_hi}) ...")
@@ -5443,6 +7568,18 @@ def main(street_depth=1.5, street_ramp=7.0, street_width=1.0,
                                             source_weight=runoff_weight_hi)
     print(f"  Reduciendo a {ny_vis}×{nx_vis} para visualización ...")
     hydrology_data = downsample_hydrology_data(hydrology_hires, ny_vis, nx_vis, FLOW_RESOLUTION_SCALE)
+    export_surface_grid(
+        hydrology_hires, surface_layers, surface_sinks, FLOW_RESOLUTION_SCALE,
+        BASE_DIR / "results" / "hydrology" / "surface_grid.json",
+        params={
+            "street_depth": round(float(street_depth), 1),
+            "street_width": round(float(street_width), 1),
+            "street_ramp": round(float(street_ramp), 1),
+            "river_depth": round(float(river_depth), 1),
+            "river_width": round(float(river_width), 1),
+            "flow_resolution_scale": int(FLOW_RESOLUTION_SCALE),
+            "inlet_influence_radius_m": round(float(INLET_INFLUENCE_RADIUS_M), 1),
+        })
     hydraulic_nodes_3d = hydraulic_nodes_to_threejs(hydraulic_structures, lon_center, lat_center, dem, lons, lats, hydrology_data)
     hydraulic_links_3d = hydraulic_links_to_threejs(hydraulic_links, lon_center, lat_center, dem, lons, lats)
 
@@ -5457,7 +7594,14 @@ def main(street_depth=1.5, street_ramp=7.0, street_width=1.0,
         hydraulic_nodes_3d, hydraulic_links_3d, green_zones_2d,
         streets_3d, buildings_3d,
         tex_b64, catastro_b64, vendor_js, lon_center, lat_center,
-        surface_data=surface_data
+        surface_data=surface_data,
+        terrain_params={
+            "street_depth": round(float(street_depth), 1),
+            "street_width": round(float(street_width), 1),
+            "street_ramp": round(float(street_ramp), 1),
+            "river_depth": round(float(river_depth), 1),
+            "river_width": round(float(river_width), 1),
+        },
     )
 
     html_size = len(html_content.encode("utf-8"))

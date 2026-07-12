@@ -58,6 +58,24 @@ def _safe_float(obj, attr: str, default: float = 0.0) -> float:
         return default
 
 
+def _iter_collection_ids(collection, attr_name: str) -> list[str]:
+    """Return ids from a PySWMM collection, falling back when it is not iterable."""
+    try:
+        raw_items = list(collection)
+    except Exception:
+        return []
+
+    ids: list[str] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            item_id = item
+        else:
+            item_id = getattr(item, attr_name, str(item))
+        if item_id:
+            ids.append(str(item_id))
+    return ids
+
+
 class SwmmSimulationService:
     def __init__(self, near_capacity_ratio: float = 0.80):
         self.near_capacity_ratio = near_capacity_ratio
@@ -94,13 +112,21 @@ class SwmmSimulationService:
                     mapped_nodes[sink_id] = nodes[node_id]
                 except Exception as exc:
                     raise KeyError(f"El nodo SWMM no existe para el tragante {sink_id}: {node_id}") from exc
+            observed_node_ids = _iter_collection_ids(nodes, "nodeid")
+            if not observed_node_ids:
+                observed_node_ids = list(dict.fromkeys(node_mapping.values()))
 
             step_index = 0
+            sim_origin = None
             for _ in sim:
                 current_time = getattr(sim, "current_time", None)
                 if not isinstance(current_time, datetime):
                     current_time = start_time + timedelta(minutes=step_index * request.report_step_min)
-                minute = max(0.0, (current_time - start_time).total_seconds() / 60.0)
+                # El minuto del hidrograma se mide desde el inicio de la propia
+                # simulación: la fecha del INP puede no coincidir con start_time.
+                if sim_origin is None:
+                    sim_origin = current_time
+                minute = max(0.0, (current_time - sim_origin).total_seconds() / 60.0)
                 if minute > duration_min + 1e-9:
                     break
 
@@ -108,7 +134,7 @@ class SwmmSimulationService:
                     q = flow_at_minute(hydrographs.get(sink_id, []), minute)
                     node.generated_inflow(q)
 
-                for node_id in list(node_mapping.values()):
+                for node_id in observed_node_ids:
                     node = nodes[node_id]
                     total_inflow = _safe_float(node, "total_inflow")
                     flooding = _safe_float(node, "flooding")
