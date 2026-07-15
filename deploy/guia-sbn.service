@@ -7,7 +7,7 @@ Type=simple
 User=www-data
 WorkingDirectory=/var/www/tesis-cariari
 ExecStart=/var/www/tesis-cariari/.venv/bin/gunicorn app:app \
-    -w 2 \
+    -w 1 \
     -k uvicorn.workers.UvicornWorker \
     --bind 127.0.0.1:8010
 Restart=on-failure

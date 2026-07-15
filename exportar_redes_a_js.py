@@ -16,7 +16,7 @@ except ImportError:
     sys.exit("pip install geopandas")
 
 BASE       = Path(__file__).parent
-SHP_DIR    = BASE / "output/shapefiles_v6"
+SHP_DIR    = BASE / "output/shapefiles_v7"
 HTML_PATH  = BASE / "resultados_refinados/Refinado_30_ThreeJS_Cortina_Ajustada.html"
 
 # Centro de escena extraido del HTML (Lat/Lon en el panel de info)

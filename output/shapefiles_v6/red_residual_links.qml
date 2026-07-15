@@ -154,7 +154,7 @@
             <Option name="type" type="QString" value="collection"/>
           </Option>
         </data_defined_properties>
-        <layer class="SimpleLine" enabled="1" id="{7b2dc757-4831-4432-8d97-ebc1b0956f9d}" locked="0" pass="0">
+        <layer class="SimpleLine" enabled="1" id="{650b9fb5-9824-4881-911b-ed849a42b40f}" locked="0" pass="0">
           <Option type="Map">
             <Option name="align_dash_pattern" type="QString" value="0"/>
             <Option name="capstyle" type="QString" value="round"/>
@@ -192,7 +192,7 @@
             </Option>
           </data_defined_properties>
         </layer>
-        <layer class="MarkerLine" enabled="1" id="{ddf85b0a-7bf4-41ea-9fd4-ec1e8f8ac115}" locked="0" pass="0">
+        <layer class="MarkerLine" enabled="1" id="{34cb86a8-b860-4a7f-b054-6f90f08cb1db}" locked="0" pass="0">
           <Option type="Map">
             <Option name="average_angle_length" type="QString" value="4"/>
             <Option name="average_angle_map_unit_scale" type="QString" value="3x:0,0,0,0,0,0"/>
@@ -227,7 +227,7 @@
                 <Option name="type" type="QString" value="collection"/>
               </Option>
             </data_defined_properties>
-            <layer class="SimpleMarker" enabled="1" id="{040a9341-e8f6-47eb-8045-49b5dcf1ba3e}" locked="0" pass="0">
+            <layer class="SimpleMarker" enabled="1" id="{419cc1f8-953f-4c66-b9c8-c690dbb95d97}" locked="0" pass="0">
               <Option type="Map">
                 <Option name="angle" type="QString" value="90"/>
                 <Option name="cap_style" type="QString" value="square"/>

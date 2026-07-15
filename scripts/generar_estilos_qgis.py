@@ -23,22 +23,28 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from qgis.core import (  # noqa: E402
     Qgis,
     QgsApplication,
+    QgsCategorizedSymbolRenderer,
     QgsLineSymbol,
     QgsMapRendererParallelJob,
     QgsMapSettings,
     QgsMarkerLineSymbolLayer,
     QgsMarkerSymbol,
+    QgsPalLayerSettings,
     QgsProperty,
+    QgsRendererCategory,
     QgsSimpleMarkerSymbolLayer,
     QgsSingleSymbolRenderer,
     QgsSymbolLayer,
+    QgsTextBufferSettings,
+    QgsTextFormat,
     QgsVectorLayer,
+    QgsVectorLayerSimpleLabeling,
 )
 from qgis.PyQt.QtCore import QSize, Qt  # noqa: E402
-from qgis.PyQt.QtGui import QColor  # noqa: E402
+from qgis.PyQt.QtGui import QColor, QFont  # noqa: E402
 
 BASE      = Path(__file__).resolve().parents[1]
-SHP_DIR   = BASE / "output" / "shapefiles_v6"
+SHP_DIR   = BASE / "output" / "shapefiles_v7"
 STYLE_DIR = BASE / "styles" / "qgis"
 OUT_PNG   = BASE / "output" / "qgis" / "flechas_preview.png"
 
@@ -86,6 +92,55 @@ def style_flechas(layer, arrow_color):
     layer.setRenderer(QgsSingleSymbolRenderer(marker))
 
 
+def _circulo(color, size_mm=2.0):
+    sm = QgsSimpleMarkerSymbolLayer(Qgis.MarkerShape.Circle, size_mm)
+    sm.setColor(color)
+    sm.setStrokeColor(QColor(255, 255, 255))
+    marker = QgsMarkerSymbol()
+    marker.changeSymbolLayer(0, sm)
+    return marker
+
+
+def _etiqueta_id(layer, color):
+    fmt = QgsTextFormat()
+    fmt.setFont(QFont("Arial"))
+    fmt.setSize(8.5)
+    fmt.setColor(color.darker(120))
+    buf = QgsTextBufferSettings()
+    buf.setEnabled(True)
+    buf.setSize(0.9)
+    buf.setColor(QColor(255, 255, 255))
+    fmt.setBuffer(buf)
+    pal = QgsPalLayerSettings()
+    pal.fieldName = "id"
+    pal.setFormat(fmt)
+    layer.setLabeling(QgsVectorLayerSimpleLabeling(pal))
+    layer.setLabelsEnabled(True)
+
+
+def style_puntos_ids(layer, color, size_mm=2.0):
+    """Punto pequeño + etiqueta con el id (para identificar cajas en capturas)."""
+    layer.setRenderer(QgsSingleSymbolRenderer(_circulo(color, size_mm)))
+    _etiqueta_id(layer, color)
+
+
+# Color por tipo de caja para las capas de nodos de red
+KIND_COLORS = {
+    "crp":      QColor(2, 119, 189),    # azul
+    "crn":      QColor(191, 54, 12),    # ladrillo
+    "tragante": QColor(46, 125, 50),    # verde
+    "desfogue": QColor(106, 27, 154),   # violeta
+}
+
+
+def style_nodos_red(layer):
+    """Nodos de red (crp/tragante/desfogue o crn): color por tipo + id."""
+    cats = [QgsRendererCategory(kind, _circulo(col, 1.9), kind)
+            for kind, col in KIND_COLORS.items()]
+    layer.setRenderer(QgsCategorizedSymbolRenderer("kind", cats))
+    _etiqueta_id(layer, QColor(60, 60, 60))
+
+
 def save_style(layer, qml_path):
     msg, ok = layer.saveNamedStyle(str(qml_path))
     if not ok:
@@ -115,10 +170,40 @@ def main():
             for name in (f"{red}_links.qml", f"{red}_flechas.qml"):
                 shutil.copyfile(STYLE_DIR / name, SHP_DIR / name)
             render_layers.extend([flechas, links])
+            if red == "red_pluvial":
+                pluv_links_layer = links
+
+        # ── Capas de puntos con id etiquetado ────────────────────────────────
+        for name, color in [("crp_puntos_ids",       KIND_COLORS["crp"]),
+                            ("crn_puntos_ids",       KIND_COLORS["crn"]),
+                            ("tragantes_puntos_ids", KIND_COLORS["tragante"]),
+                            ("desfogues_puntos_ids", KIND_COLORS["desfogue"])]:
+            shp = SHP_DIR / f"{name}.shp"
+            if not shp.exists():
+                print(f"  AVISO: no existe {shp.name}")
+                continue
+            capa = QgsVectorLayer(str(shp), name, "ogr")
+            if not capa.isValid():
+                continue
+            style_puntos_ids(capa, color, size_mm=1.7 if "tragante" in name else 2.0)
+            save_style(capa, STYLE_DIR / f"{name}.qml")
+            shutil.copyfile(STYLE_DIR / f"{name}.qml", SHP_DIR / f"{name}.qml")
+            render_layers.insert(0, capa)
+
+        # ── Nodos de red: color por tipo de caja + etiqueta id ───────────────
+        for name in ("red_pluvial_nodos", "red_residual_nodos"):
+            shp = SHP_DIR / f"{name}.shp"
+            if not shp.exists():
+                continue
+            capa = QgsVectorLayer(str(shp), name, "ogr")
+            if not capa.isValid():
+                continue
+            style_nodos_red(capa)
+            save_style(capa, STYLE_DIR / f"{name}.qml")
+            shutil.copyfile(STYLE_DIR / f"{name}.qml", SHP_DIR / f"{name}.qml")
 
         # ── Render de verificacion: zoom al tramo pluvial mas largo ──────────
-        pluv_links = render_layers[1]
-        longest = max(pluv_links.getFeatures(), key=lambda f: f["dist_m"] or 0)
+        longest = max(pluv_links_layer.getFeatures(), key=lambda f: f["dist_m"] or 0)
         extent = longest.geometry().boundingBox()
         extent.grow(80)
 

@@ -33,12 +33,17 @@ BASE = Path(__file__).parent
 
 ALCANTARILLADO_SHP = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Alcantarillado.shp"
 LINEAS_SHP         = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/liteas a seguir.shp"
-TRAGANTES_SHP      = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Tragantes.shp"
-CRP_SHP            = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRP.shp"
-CRN_SHP            = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRN_CAPA.shp"
+# jul 2026: capas reorganizadas por el usuario — CRP ampliado a 277 puntos,
+# tragantes a 254; los nombres viejos (CRP.shp, CRN_CAPA.shp, Tragantes.shp) ya no existen
+TRAGANTES_SHP      = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Tragantes (2).shp"
+CRP_SHP            = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRP actualizado/CRP actualizado.shp"
+CRN_SHP            = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRN (2).shp"
 DESFOGUES_SHP      = BASE / "Arcgis shapes y curvas/Desfogues.shp"
+# Conexiones trazadas a mano por el usuario sobre la capa de links exportada
+# (solo se usan las filas SIN src_id: las dibujadas, no las re-exportadas)
+LINEAS_USUARIO_SHP = BASE / "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Pluvial actualizado/Pluvial actualizado.shp"
 OUT_DIR            = BASE / "output/shapefiles"
-OUT_DIR_V2         = BASE / "output/shapefiles_v6"   # v6: tipo de linea por extremos
+OUT_DIR_V2         = BASE / "output/shapefiles_v7"   # v7: CRP ampliado + conexiones manuales
 
 # ── Tolerancias (metros, CRTM05) ─────────────────────────────────────────────────
 SNAP_ENDPOINT_TOL_M = 30.0   # caja cercana al extremo de una linea -> anclada al extremo
@@ -51,6 +56,82 @@ MAX_ADVERSE_DROP_M  = -1.0   # caida hidraulica minima aceptada (negativo = sube
 MIN_ELEV      = 900.0
 MAX_ELEV      = 1100.0
 DEFAULT_DEPTH = {"tragante": 0.80, "crp": 1.60, "crn": 1.40, "desfogue": 0.60}
+
+# Desfogues: sin datos de campo. Se les asigna una cota MAS BAJA que la de los
+# nodos vecinos para que la orientacion por gravedad siempre fluya hacia ellos.
+DESFOGUE_DROP_M    = 1.0    # metros por debajo del nodo mas bajo del vecindario
+DESFOGUE_RADIO_M   = 120.0  # radio de busqueda de nodos de referencia
+DESFOGUE_CONNECT_M = 150.0  # radio de conexion de desfogues huerfanos (son
+                            # los puntos de descarga: mejor un tramo largo
+                            # estimado que dejarlos fuera de la red)
+
+# Sentidos confirmados en campo/plano por el usuario, aunque las cotas de
+# fondo digitalizadas indiquen lo contrario (se respetan tal cual en [5c]).
+# Plano colector troncal Los Arcos-Cariari: el pluvial sigue la calle al sur.
+FORCED_FLOW = [
+    ("crp_7", "crp_9"),
+    ("crp_9", "crp_10"),
+    ("crp_75", "crp_76"),   # el pluvial sigue la calle al NO (plano, 2026-07-14)
+    ("crp_19", "crp_20"),   # fondos casi planos (5 cm); el usuario confirma 19->20
+    # Corredor 41->42: los fondos reales caen 960.33 -> 960.05; las cotas
+    # estimadas de los clones (superficie con loma en medio) partirian el
+    # flujo en dos — el tubo real va enterrado bajo la loma.
+    ("crp_41", "crp_x40"),
+    ("crp_x40", "crp_x41"),
+    ("crp_x41", "crp_x42"),
+    ("crp_x42", "crp_42"),
+]
+
+# Cajas pluviales que existen en campo pero no estan en CRP actualizado:
+# se clonan de la posicion de la caja CRN del mismo pozo/esquina.
+# El id resultante es crp_x<numero> (p.ej. crn_115 -> crp_x115).
+CRP_DESDE_CRN = ["crn_115", "crn_40", "crn_41", "crn_42", "crn_38"]
+
+# Conexiones pluviales decididas por el usuario. Se enrutan por las lineas
+# guia si es posible; si no, tramo recto. El sentido lo dan las reglas.
+CONECTAR_DIRECTO = [
+    ("crp_x115", "crp_75"),
+    ("crp_77", "crp_57"),      # el 77 drena via 57 (plano, 2026-07-14)
+    ("crp_56", "desfogue_5"),  # seccion larga que los limites automaticos no tomaban
+    ("crp_49", "crp_54"),      # seccion faltante (usuario, 2026-07-14): destapa
+                               # el pozo de crp_49 (10 entradas sin salida)
+    # Corredor crp_41 -> crp_42 por el camino real (via cajas junto a
+    # crn_40/41/42; el directo de 155 m iba por la calle equivocada)
+    ("crp_41", "crp_x40"),
+    ("crp_x40", "crp_x41"),
+    ("crp_x41", "crp_x42"),
+    ("crp_x42", "crp_42"),
+    # La calle que baja del sur pasa POR la rotonda (caja junto a crn_38)
+    ("crp_43", "crp_x38"),
+    ("crp_x38", "crp_38"),
+    ("crp_19", "crp_20"),      # seccion real (usuario); el 20-21 era invento
+]
+
+# Pares que NUNCA deben conectarse (el gap-fill los inventaba).
+# crp_x115 existe solo para bajar a crp_75, y crp_75 continua a crp_76:
+# sin atajos automaticos a los desfogues del rio.
+NO_CONECTAR = [
+    ("crp_75", "desfogue_4"),
+    ("crp_x115", "desfogue_2"),
+    ("crp_x115", "desfogue_4"),
+    ("crp_77", "desfogue_5"),   # el 77 NO descarga directo: va via crp_57
+    ("crp_146", "crp_42"),      # ese tramo no existe en campo (usuario)
+    ("crp_41", "crp_42"),       # el corredor 41-42 va via crp_x40/x41/x42
+    ("crp_42", "crp_136"),      # tampoco existe en campo (usuario, 2026-07-14)
+    ("crp_43", "crp_38"),       # el directo salta la rotonda: va via crp_x38
+    ("crp_20", "crp_21"),       # no existe en campo: el 20 recibe del 19
+]
+
+# Tragantes que NO deben generar lateral automatico (el mas cercano les
+# quedaba cruzando casas u otras barreras; confirmar destino real en campo).
+TRAGANTES_SIN_LATERAL = {
+    "tragante_39",   # su lateral de 56 m cruzaba la manzana hasta crp_17
+}
+_NO_CONECTAR_SET = {tuple(sorted(p)) for p in NO_CONECTAR}
+
+
+def _par_prohibido(id_a, id_b):
+    return tuple(sorted((id_a, id_b))) in _NO_CONECTAR_SET
 
 
 # ── Utilidades ───────────────────────────────────────────────────────────────────
@@ -65,6 +146,9 @@ def _safe_float(v):
 
 # ── Carga de datos ───────────────────────────────────────────────────────────────
 
+DEDUP_TOL_M = 0.1   # puntos a <10 cm son la misma caja digitalizada dos veces
+
+
 def load_nodes(shp_path, kind, surface_field, depth_field):
     p = Path(shp_path)
     if not p.exists():
@@ -76,11 +160,15 @@ def load_nodes(shp_path, kind, surface_field, depth_field):
     if gdf.crs and gdf.crs.to_epsg() != 5367:
         gdf = gdf.to_crs(epsg=5367)
     nodes = []
+    n_dup = 0
     for _, row in gdf.iterrows():
         geom = row.geometry
         if geom is None or geom.is_empty or geom.geom_type != "Point":
             continue
         x, y = float(geom.x), float(geom.y)
+        if any(math.hypot(n["x"] - x, n["y"] - y) < DEDUP_TOL_M for n in nodes):
+            n_dup += 1
+            continue  # duplicado exacto: conservar el primero (ids estables)
         raw_s = _safe_float(row.get(surface_field))
         raw_f = _safe_float(row.get(depth_field))
         surface_elev  = raw_s if raw_s is not None and MIN_ELEV <= raw_s <= MAX_ELEV else None
@@ -98,7 +186,58 @@ def load_nodes(shp_path, kind, surface_field, depth_field):
             "prof_src":       "campo" if depth_ok else "estimado",
             "hydraulic_elev": hydraulic_elev,
         })
+    if n_dup:
+        print(f"  {p.stem}: {n_dup} puntos duplicados descartados (mismo sitio)")
     return nodes
+
+
+def clonar_crp_desde_crn(nodes_crp, nodes_crn):
+    """Crea cajas CRP en la posicion de cajas CRN conocidas (CRP_DESDE_CRN).
+    La caja pluvial real comparte esquina con la residual; se toma su cota de
+    superficie y profundidad tipica de CRP (estimada). Se desplaza ~2 m para
+    que ambos puntos se distingan en el mapa."""
+    crn_por_id = {n["id"]: n for n in nodes_crn}
+    for cid in CRP_DESDE_CRN:
+        base = crn_por_id.get(cid)
+        if base is None:
+            print(f"  AVISO: CRP_DESDE_CRN no encontro {cid}")
+            continue
+        sup = base["sup_elev"]
+        prof = DEFAULT_DEPTH["crp"]
+        nodes_crp.append({
+            "id":             f"crp_x{cid.split('_')[1]}",
+            "kind":           "crp",
+            "x":              base["x"] + 2.0,
+            "y":              base["y"] - 2.0,
+            "sup_elev":       sup,
+            "fon_elev":       round(sup - prof, 3) if sup is not None else None,
+            "prof_m":         prof,
+            "prof_src":       "estimado",
+            "hydraulic_elev": (sup - prof) if sup is not None else None,
+        })
+        print(f"  Clonado {cid} -> crp_x{cid.split('_')[1]} (S={sup}, prof estimada {prof})")
+
+
+def connect_directos(sections, node_by_id, backbone_lines):
+    """Crea las conexiones de CONECTAR_DIRECTO que aun no existan."""
+    existentes = {tuple(sorted((s["src_id"], s["dst_id"]))) for s in sections}
+    nuevos = []
+    for a_id, b_id in CONECTAR_DIRECTO:
+        if tuple(sorted((a_id, b_id))) in existentes:
+            continue
+        na, nb = node_by_id.get(a_id), node_by_id.get(b_id)
+        if na is None or nb is None:
+            print(f"  AVISO: CONECTAR_DIRECTO no encontro {a_id} o {b_id}")
+            continue
+        routed = _route_via_line(na, nb, backbone_lines, tol=60.0)
+        if routed is not None:
+            geom, n_s, n_d = routed
+            nuevos.append(_make_section(f"dir_{len(nuevos) + 1}", n_s, n_d, geom))
+        else:
+            geom = LineString([(na["x"], na["y"]), (nb["x"], nb["y"])])
+            nuevos.append(_make_section(f"dir_{len(nuevos) + 1}", na, nb, geom))
+    print(f"  Conexiones directas: {len(nuevos)}")
+    return nuevos
 
 
 def load_desfogues():
@@ -129,21 +268,50 @@ def load_desfogues():
     return nodes
 
 
+def assign_desfogue_elevations(desfogues, ref_nodes):
+    """
+    Asigna cota de fondo a los desfogues (Desfogues.shp no trae elevaciones):
+    DESFOGUE_DROP_M por debajo del nodo MAS BAJO dentro de DESFOGUE_RADIO_M.
+    Asi `_make_section` orienta por gravedad siempre HACIA el desfogue.
+    """
+    refs = [n for n in ref_nodes if n["hydraulic_elev"] is not None]
+    for d in desfogues:
+        near = [n for n in refs
+                if math.hypot(n["x"] - d["x"], n["y"] - d["y"]) <= DESFOGUE_RADIO_M]
+        if near:
+            base = min(n["hydraulic_elev"] for n in near)
+        elif refs:
+            nearest = min(refs, key=lambda n: math.hypot(n["x"] - d["x"], n["y"] - d["y"]))
+            base = nearest["hydraulic_elev"]
+        else:
+            base = 935.0
+        he = round(base - DESFOGUE_DROP_M, 3)
+        d["hydraulic_elev"] = he
+        d["fon_elev"]       = he
+        d["sup_elev"]       = round(he + d["prof_m"], 3)
+
+
 def _line_hash(coords):
     return tuple((round(x, 1), round(y, 1)) for x, y in coords)
 
 
 def load_backbone_lines():
-    """Carga Alcantarillado.shp + liteas a seguir.shp sin duplicados."""
+    """Carga Alcantarillado.shp + liteas a seguir.shp + conexiones manuales
+    del usuario (Pluvial actualizado, solo filas dibujadas) sin duplicados."""
     seen  = set()
     lines = []
-    for shp, prefix in [(ALCANTARILLADO_SHP, "alc"), (LINEAS_SHP, "lin")]:
+    for shp, prefix in [(ALCANTARILLADO_SHP, "alc"), (LINEAS_SHP, "lin"),
+                        (LINEAS_USUARIO_SHP, "usr")]:
         if not Path(shp).exists():
             print(f"  AVISO: no se encontro {Path(shp).name}")
             continue
         gdf = gpd.read_file(str(shp))
         if gdf.crs and gdf.crs.to_epsg() != 5367:
             gdf = gdf.to_crs(epsg=5367)
+        if prefix == "usr" and "src_id" in gdf.columns:
+            # Solo las lineas trazadas a mano (las re-exportadas traen src_id)
+            gdf = gdf[gdf["src_id"].isna() | (gdf["src_id"].astype(str) == "")]
+            print(f"  Conexiones manuales del usuario: {len(gdf)}")
         for _, row in gdf.iterrows():
             geom = row.geometry
             if geom is None or geom.is_empty:
@@ -228,10 +396,27 @@ def assign_nodes_to_line(line_geom, box_nodes):
     return result
 
 
+def _dobla_atras(a, b, c, umbral_deg=100.0):
+    """True si en b el trazo a->b->c 'se devuelve' (gira mas que umbral)."""
+    v1x, v1y = b.x - a.x, b.y - a.y
+    v2x, v2y = c.x - b.x, c.y - b.y
+    l1 = math.hypot(v1x, v1y)
+    l2 = math.hypot(v2x, v2y)
+    if l1 < 0.01 or l2 < 0.01:
+        return False
+    cosang = (v1x * v2x + v1y * v2y) / (l1 * l2)
+    return math.degrees(math.acos(max(-1.0, min(1.0, cosang)))) > umbral_deg
+
+
 def extract_sub_segment(line_geom, d_start, d_end, start_xy=None, end_xy=None):
     """
     Extrae subsegmento entre d_start y d_end preservando vertices originales.
     Los extremos se anclan a las coordenadas exactas de los nodos (fijos).
+
+    Poda de ganchos: si la linea guia fue dibujada pasandose de la caja
+    (tipico en extremos con snap), quedaban vertices sobrantes y el trazo
+    se devolvia en curva antes de llegar al punto. Se eliminan los vertices
+    junto a cada extremo mientras el giro ahi supere los 100 grados.
     """
     p_start = Point(start_xy) if start_xy is not None else line_geom.interpolate(d_start)
     inner   = []
@@ -242,6 +427,20 @@ def extract_sub_segment(line_geom, d_start, d_end, start_xy=None, end_xy=None):
     p_end = Point(end_xy) if end_xy is not None else line_geom.interpolate(d_end)
 
     pts = [p_start] + inner + [p_end]
+
+    while len(pts) > 2 and _dobla_atras(pts[0], pts[1], pts[2]):
+        pts.pop(1)
+    while len(pts) > 2 and _dobla_atras(pts[-3], pts[-2], pts[-1]):
+        pts.pop(-2)
+
+    # Vertices pegados al nodo (<5 m): la linea guia suele estar dibujada
+    # hasta la caja VECINA (p.ej. la CRN de la esquina) y el trazo tocaba ese
+    # punto ajeno antes de saltar a su caja. Entrar directo al nodo.
+    while len(pts) > 2 and pts[1].distance(pts[0]) < 5.0:
+        pts.pop(1)
+    while len(pts) > 2 and pts[-2].distance(pts[-1]) < 5.0:
+        pts.pop(-2)
+
     unique = [pts[0]]
     for p in pts[1:]:
         if p.distance(unique[-1]) > 0.01:
@@ -259,14 +458,32 @@ def classify_network(kind_src, kind_dst):
 
 
 def _make_section(seg_id, n_src, n_dst, geom):
+    """El sentido queda src -> dst. Reglas de orientacion (en orden):
+    1. Un desfogue solo puede RECIBIR flujo (siempre queda como dst).
+    2. Si alguna caja tiene profundidad ESTIMADA (p.ej. "sellada"), su fondo
+       calculado no es confiable: se orienta por la SUPERFICIE medida.
+    3. Gravedad: src = mayor cota de fondo (hydraulic_elev).
+    4. Sin datos suficientes: se conserva el orden de llegada (trazado)."""
     he_src = n_src["hydraulic_elev"]
     he_dst = n_dst["hydraulic_elev"]
-    if he_src is not None and he_dst is not None and he_src < he_dst:
+    ori = "fon"
+    if n_src["kind"] == "desfogue" and n_dst["kind"] != "desfogue":
+        flip = True
+    elif n_dst["kind"] == "desfogue":
+        flip = False
+    elif ((n_src["prof_src"] == "estimado" or n_dst["prof_src"] == "estimado")
+          and n_src["sup_elev"] is not None and n_dst["sup_elev"] is not None):
+        flip = n_src["sup_elev"] < n_dst["sup_elev"]
+        ori = "sup"
+    else:
+        flip = he_src is not None and he_dst is not None and he_src < he_dst
+    if flip:
         n_src, n_dst = n_dst, n_src
         geom = LineString(list(reversed(geom.coords)))
         he_src, he_dst = he_dst, he_src
     drop_m = round(he_src - he_dst, 3) if he_src is not None and he_dst is not None else None
     return {
+        "_ori":     ori,
         "id":       seg_id,
         "red":      classify_network(n_src["kind"], n_dst["kind"]),
         "src_id":   n_src["id"],
@@ -283,6 +500,18 @@ def _make_section(seg_id, n_src, n_dst, geom):
         "snap_dst": "T",
         "geom":     geom,
     }
+
+
+def _flip_link(lk):
+    """Invierte el sentido de un tramo ya construido (src <-> dst)."""
+    lk["src_id"],   lk["dst_id"]   = lk["dst_id"],   lk["src_id"]
+    lk["src_kind"], lk["dst_kind"] = lk["dst_kind"], lk["src_kind"]
+    lk["src_elev"], lk["dst_elev"] = lk["dst_elev"], lk["src_elev"]
+    lk["src_prof"], lk["dst_prof"] = lk["dst_prof"], lk["src_prof"]
+    lk["snap_src"], lk["snap_dst"] = lk["snap_dst"], lk["snap_src"]
+    lk["geom"] = LineString(list(reversed(lk["geom"].coords)))
+    if lk["src_elev"] is not None and lk["dst_elev"] is not None:
+        lk["drop_m"] = round(lk["src_elev"] - lk["dst_elev"], 3)
 
 
 # ── Paso principal: secciones nodo-a-nodo por linea de alcantarillado ─────────────
@@ -337,16 +566,20 @@ def process_lines_into_sections(backbone_lines, box_nodes):
     Una vez determinado el tipo, solo se buscan nodos de ESE tipo sobre la linea
     — jamas se mezclan CRN y CRP en el mismo ramal.
     """
-    crn_nodes = [n for n in box_nodes if n["kind"] in ("crn", "desfogue")]
-    crp_nodes = [n for n in box_nodes if n["kind"] == "crp"]
+    crn_puros = [n for n in box_nodes if n["kind"] == "crn"]
+    crp_puros = [n for n in box_nodes if n["kind"] == "crp"]
+    desfogues = [n for n in box_nodes if n["kind"] == "desfogue"]
 
-    sections  = []
-    unmatched = []
+    sections   = []
+    unmatched  = []
+    seen_pairs = set()   # evita tramos duplicados cuando dos guias cubren el mismo par
 
     for line in backbone_lines:
         line_geom = LineString(line["coords"])
 
-        net_type, type_nodes = _type_of_line(line_geom, crn_nodes, crp_nodes)
+        # El tipo lo deciden los nodos CRN/CRP puros; los desfogues son
+        # neutrales (pueden rematar lineas de cualquiera de las dos redes).
+        net_type, _ = _type_of_line(line_geom, crn_puros, crp_puros)
         if net_type is None:
             unmatched.append({
                 "id": line["id"], "geom": line_geom,
@@ -354,7 +587,8 @@ def process_lines_into_sections(backbone_lines, box_nodes):
             })
             continue
 
-        # Solo nodos del tipo correcto sobre esta linea
+        # Solo nodos del tipo correcto sobre esta linea (+ desfogues)
+        type_nodes = (crn_puros if net_type == "crn" else crp_puros) + desfogues
         node_list = assign_nodes_to_line(line_geom, type_nodes)
         if len(node_list) < 2:
             unmatched.append({
@@ -368,6 +602,13 @@ def process_lines_into_sections(backbone_lines, box_nodes):
             d1, n_dst = node_list[i + 1]
             if d1 - d0 < MIN_SECTION_M or n_src["id"] == n_dst["id"]:
                 continue
+            if n_src["kind"] == "desfogue" and n_dst["kind"] == "desfogue":
+                continue  # dos descargas no forman tramo
+            if _par_prohibido(n_src["id"], n_dst["id"]):
+                continue
+            pair = (min(n_src["id"], n_dst["id"]), max(n_src["id"], n_dst["id"]))
+            if pair in seen_pairs:
+                continue
             seg_geom = extract_sub_segment(
                 line_geom, d0, d1,
                 start_xy=(n_src["x"], n_src["y"]),
@@ -375,6 +616,7 @@ def process_lines_into_sections(backbone_lines, box_nodes):
             )
             if seg_geom is None:
                 continue
+            seen_pairs.add(pair)
             sections.append(_make_section(f"sec_{len(sections) + 1}", n_src, n_dst, seg_geom))
 
     print(f"  Secciones backbone (nodo-a-nodo): {len(sections)} | Lineas sin asignar: {len(unmatched)}")
@@ -425,9 +667,13 @@ def _route_via_line(n_a, n_b, backbone_lines, tol=None):
 
 
 def _compatible_kinds(kind_a, kind_b):
-    """True si ambos nodos pertenecen a la misma red (nunca CRP<->CRN)."""
+    """True si ambos nodos pueden pertenecer a la misma red (nunca CRP<->CRN).
+    Los desfogues son puntos de descarga de CUALQUIERA de las dos redes,
+    pero jamas se conectan entre si (ambos son terminales)."""
+    if kind_a == "desfogue" and kind_b == "desfogue":
+        return False
     residual = {"crn", "desfogue"}
-    pluvial  = {"crp"}
+    pluvial  = {"crp", "desfogue"}
     if kind_a in residual and kind_b in residual:
         return True
     if kind_a in pluvial and kind_b in pluvial:
@@ -475,11 +721,14 @@ def connect_orphan_nodes(sections, box_nodes, node_by_id, backbone_lines):
             # Solo mismo tipo de red
             if not _compatible_kinds(orph["kind"], n["kind"]):
                 continue
+            if _par_prohibido(orph["id"], n["id"]):
+                continue
             d = math.hypot(n["x"] - ox, n["y"] - oy)
             if d < best_d:
                 best_d = d
                 best_n = n
-        if best_n is None or best_d > CONNECT_ORPHAN_M:
+        max_d = DESFOGUE_CONNECT_M if orph["kind"] == "desfogue" else CONNECT_ORPHAN_M
+        if best_n is None or best_d > max_d:
             continue
         if not _elevation_ok(orph, best_n):
             continue
@@ -531,7 +780,7 @@ def connect_same_type_gaps(sections, box_nodes, backbone_lines, max_dist=GAP_FIL
         direct_pairs.add((min(a, b), max(a, b)))
 
     crn_group = [n for n in box_nodes if n["kind"] in ("crn", "desfogue")]
-    crp_group = [n for n in box_nodes if n["kind"] == "crp"]
+    crp_group = [n for n in box_nodes if n["kind"] in ("crp", "desfogue")]
 
     new_sections = []
 
@@ -543,6 +792,10 @@ def connect_same_type_gaps(sections, box_nodes, backbone_lines, max_dist=GAP_FIL
 
             for n_b in group:
                 if n_b["id"] == n_a["id"]:
+                    continue
+                if not _compatible_kinds(n_a["kind"], n_b["kind"]):
+                    continue
+                if _par_prohibido(n_a["id"], n_b["id"]):
                     continue
                 pair = (min(n_a["id"], n_b["id"]), max(n_a["id"], n_b["id"]))
                 if pair in direct_pairs:
@@ -620,7 +873,7 @@ def process_tragante_laterals(nodes_trag, all_sections):
     n_skip   = 0
 
     for trag in nodes_trag:
-        if trag["id"] in trag_already:
+        if trag["id"] in trag_already or trag["id"] in TRAGANTES_SIN_LATERAL:
             continue
         tx, ty = trag["x"], trag["y"]
         pt     = Point(tx, ty)
@@ -729,6 +982,28 @@ def export_nodes(node_index, node_ids, out_path, red_name):
     print(f"  -> {out_path.name}  ({len(gdf)} nodos)")
 
 
+def export_puntos_ids(nodes, out_path):
+    """Exporta TODOS los puntos de un tipo con su id asignado (esten o no
+    conectados a la red), para identificarlos con etiquetas en QGIS."""
+    rows = [
+        {
+            "geometry": Point(n["x"], n["y"]),
+            "id":       n["id"],
+            "kind":     n["kind"],
+            "sup_elev": n["sup_elev"],
+            "fon_elev": n["fon_elev"],
+            "prof_m":   n["prof_m"],
+            "prof_src": n["prof_src"],
+        }
+        for n in nodes
+    ]
+    if not rows:
+        return
+    gdf = gpd.GeoDataFrame(rows, crs="EPSG:5367")
+    gdf.to_file(str(out_path), encoding="utf-8")
+    print(f"  -> {out_path.name}  ({len(gdf)} puntos con id)")
+
+
 def export_unmatched(unmatched_geoms, out_path):
     if not unmatched_geoms:
         return
@@ -752,14 +1027,24 @@ def main():
     nodes_crp  = load_nodes(CRP_SHP,       "crp",      "S (altura)", "F (fondo)")
     nodes_crn  = load_nodes(CRN_SHP,       "crn",      "S(altura)",  "F(fondo)")
     nodes_des  = load_desfogues()
+    clonar_crp_desde_crn(nodes_crp, nodes_crn)
     node_index = nodes_trag + nodes_crp + nodes_crn + nodes_des
     node_by_id = {n["id"]: n for n in node_index}
     print(f"  Tragantes: {len(nodes_trag)} | CRP: {len(nodes_crp)} | CRN: {len(nodes_crn)} | Desfogues: {len(nodes_des)}")
+
+    print("\n[2b] Asignando cota a desfogues (minimo del vecindario - "
+          f"{DESFOGUE_DROP_M} m) ...")
+    assign_desfogue_elevations(nodes_des, nodes_crp + nodes_crn)
+    for d in nodes_des:
+        print(f"  {d['id']}: fondo {d['fon_elev']} m")
 
     box_nodes = nodes_crp + nodes_crn + nodes_des
 
     print("\n[3] Construyendo secciones nodo-a-nodo por linea de alcantarillado ...")
     sections, unmatched = process_lines_into_sections(backbone, box_nodes)
+
+    print("\n[3b] Conexiones directas decididas por el usuario ...")
+    sections += connect_directos(sections, node_by_id, backbone)
 
     print("\n[4] Conectando nodos huerfanos ...")
     orphan_links = connect_orphan_nodes(sections, box_nodes, node_by_id, backbone)
@@ -767,8 +1052,78 @@ def main():
     print("\n[4b] Gap-fill: conectando nodos del mismo tipo via alcantarillado ...")
     gap_links = connect_same_type_gaps(sections + orphan_links, box_nodes, backbone)
 
+    all_sections = sections + orphan_links + gap_links
+
+    # Triangulos: si A y B ya drenan al mismo punto (p.ej. ambos a un
+    # desfogue) y ademas existe un tramo automatico A-B, ese tramo es
+    # redundante y dibuja un "triangulo" sin sentido hidraulico. Se elimina
+    # el tramo AUTO (gap_/orph_) de cada triangulo; los dibujados (sec_) y
+    # los decididos por el usuario (dir_) nunca se tocan.
+    print("\n[4b2] Eliminando tramos automaticos que forman triangulos ...")
+    n_tri = 0
+    while True:
+        pares = {}
+        for lk in all_sections:
+            pares[frozenset((lk["src_id"], lk["dst_id"]))] = lk
+        ady = {}
+        for lk in all_sections:
+            ady.setdefault(lk["src_id"], set()).add(lk["dst_id"])
+            ady.setdefault(lk["dst_id"], set()).add(lk["src_id"])
+        candidatos = []
+        vistos = set()
+        for a in ady:
+            for b in ady[a]:
+                for c in ady[a] & ady.get(b, set()):
+                    tri = frozenset((a, b, c))
+                    if len(tri) != 3 or tri in vistos:
+                        continue
+                    vistos.add(tri)
+                    for par in [(a, b), (b, c), (a, c)]:
+                        lk = pares.get(frozenset(par))
+                        if lk is not None and lk["id"].split("_")[0] in ("gap", "orph"):
+                            es_gap = lk["id"].startswith("gap")
+                            drop = abs(lk["drop_m"]) if lk["drop_m"] is not None else 0.0
+                            candidatos.append((0 if es_gap else 1, drop, lk))
+        if not candidatos:
+            break
+        candidatos.sort(key=lambda t: (t[0], t[1]))
+        quitar = candidatos[0][2]
+        all_sections.remove(quitar)
+        n_tri += 1
+    print(f"  Tramos redundantes eliminados: {n_tri}")
+
+    # Limpieza visual: las lineas guia suelen estar dibujadas pasando por la
+    # caja de la OTRA red (CRP y CRN comparten esquina a 2-4 m); quitar los
+    # vertices interiores que caen sobre esas cajas ajenas. Debe correr ANTES
+    # de los laterales, para que las proyecciones de los tragantes caigan
+    # sobre el trazo definitivo (no sobre el trazo previo a la limpieza).
+    print("\n[4c] Limpiando vertices que caen sobre cajas de la otra red ...")
+    crp_xy = [(n["x"], n["y"]) for n in node_index if n["kind"] == "crp"]
+    crn_xy = [(n["x"], n["y"]) for n in node_index if n["kind"] == "crn"]
+
+    def _limpia_vertices_ajenos(lk, ajenos):
+        coords = list(lk["geom"].coords)
+        if len(coords) <= 2:
+            return 0
+        keep, quitados = [coords[0]], 0
+        for c in coords[1:-1]:
+            if any(math.hypot(c[0] - x, c[1] - y) < 1.5 for x, y in ajenos):
+                quitados += 1
+                continue
+            keep.append(c)
+        keep.append(coords[-1])
+        if quitados:
+            lk["geom"] = LineString(keep)
+            lk["dist_m"] = round(lk["geom"].length, 1)
+        return quitados
+
+    n_limpiados = sum(
+        _limpia_vertices_ajenos(lk, crn_xy if lk["red"] == "pluvial" else crp_xy)
+        for lk in all_sections
+    )
+    print(f"  Vertices sobre cajas ajenas eliminados: {n_limpiados}")
+
     print("\n[5] Generando laterales de Tragantes ...")
-    all_sections  = sections + orphan_links + gap_links
     lateral_links = process_tragante_laterals(nodes_trag, all_sections)
 
     all_links = all_sections + lateral_links
@@ -788,6 +1143,9 @@ def main():
             lk["src_elev"] = 936.0
             lk["dst_elev"] = round(936.0 - (dist * 0.01), 3)
 
+        if lk["drop_m"] is None:
+            lk["drop_m"] = round(lk["src_elev"] - lk["dst_elev"], 3)
+
     # Actualizar cotas en el índice de nodos
     for lk in all_links:
         src_id = lk["src_id"]
@@ -800,6 +1158,41 @@ def main():
             node_by_id[dst_id]["fon_elev"] = lk["dst_elev"]
             node_by_id[dst_id]["sup_elev"] = round(lk["dst_elev"] + node_by_id[dst_id]["prof_m"], 3)
             node_by_id[dst_id]["hydraulic_elev"] = lk["dst_elev"]
+
+    # Verificacion final de sentido: con las cotas ya completas, ningun tramo
+    # (salvo laterales de tragante, que son topologicos) debe "subir".
+    # Los pares de FORCED_FLOW se imponen tal cual (conocimiento de campo).
+    print("\n[5c] Verificacion final de sentido ...")
+    forced = {tuple(p) for p in FORCED_FLOW}
+    flipped = n_forced = 0
+    for lk in all_links:
+        par = (lk["src_id"], lk["dst_id"])
+        if par in forced:
+            n_forced += 1
+            continue                # ya va en el sentido decretado
+        if (par[1], par[0]) in forced:
+            _flip_link(lk)
+            flipped += 1
+            n_forced += 1
+            continue
+        if lk["src_kind"] == "tragante" or lk["dst_kind"] == "desfogue":
+            continue  # direccion topologica correcta por construccion
+        if lk["src_kind"] == "desfogue":
+            _flip_link(lk)          # un desfogue jamas origina flujo
+            flipped += 1
+            continue
+        se, de = lk["src_elev"], lk["dst_elev"]
+        if lk.get("_ori") == "sup":
+            # Orientado por superficie (profundidad estimada): comparar sup
+            ss = se + lk["src_prof"] if se is not None and lk["src_prof"] is not None else None
+            ds = de + lk["dst_prof"] if de is not None and lk["dst_prof"] is not None else None
+            if ss is not None and ds is not None and ss < ds:
+                _flip_link(lk)
+                flipped += 1
+        elif se is not None and de is not None and se < de:
+            _flip_link(lk)
+            flipped += 1
+    print(f"  Tramos re-orientados: {flipped} (sentidos forzados aplicados: {n_forced}/{len(forced)})")
 
     pluvial_links  = [lk for lk in all_links if lk["red"] == "pluvial"]
     residual_links = [lk for lk in all_links if lk["red"] == "residual"]
@@ -815,6 +1208,12 @@ def main():
     export_links(residual_links, OUT_DIR_V2 / "red_residual_links.shp")
     export_nodes(node_index, resi_ids,  OUT_DIR_V2 / "red_residual_nodos.shp", "residual")
     export_unmatched(unmatched,  OUT_DIR_V2 / "backbone_sin_nodos.shp")
+
+    # Capas de identificacion: todos los puntos con su id (para etiquetas QGIS)
+    export_puntos_ids(nodes_crp,  OUT_DIR_V2 / "crp_puntos_ids.shp")
+    export_puntos_ids(nodes_crn,  OUT_DIR_V2 / "crn_puntos_ids.shp")
+    export_puntos_ids(nodes_trag, OUT_DIR_V2 / "tragantes_puntos_ids.shp")
+    export_puntos_ids(nodes_des,  OUT_DIR_V2 / "desfogues_puntos_ids.shp")
 
     print(f"\nExportacion completa -> {OUT_DIR.resolve()}")
     print("\nCampos en links:")

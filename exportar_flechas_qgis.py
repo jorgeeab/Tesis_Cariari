@@ -31,7 +31,7 @@ except ImportError:
     sys.exit("pip install geopandas")
 
 BASE      = Path(__file__).parent
-SHP_DIR   = BASE / "output/shapefiles_v6"
+SHP_DIR   = BASE / "output/shapefiles_v7"
 STYLE_DIR = BASE / "styles/qgis"
 
 SPACING_M = 45.0   # separacion entre flechas a lo largo del tramo

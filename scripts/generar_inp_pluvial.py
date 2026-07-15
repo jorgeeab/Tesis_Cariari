@@ -30,8 +30,8 @@ import geopandas as gpd  # noqa: E402
 from swmm_integration.inp_builder import SwmmConduitDef, SwmmNodeDef, write_minimal_inp  # noqa: E402
 from swmm_integration.validation import validate_inp_file  # noqa: E402
 
-NODOS_SHP = BASE_DIR / "output" / "shapefiles_v6" / "red_pluvial_nodos.shp"
-LINKS_SHP = BASE_DIR / "output" / "shapefiles_v6" / "red_pluvial_links.shp"
+NODOS_SHP = BASE_DIR / "output" / "shapefiles_v7" / "red_pluvial_nodos.shp"
+LINKS_SHP = BASE_DIR / "output" / "shapefiles_v7" / "red_pluvial_links.shp"
 OUT_INP = BASE_DIR / "models" / "cariari_pluvial.inp"
 
 DEFAULT_DIAMETER_M = 0.60

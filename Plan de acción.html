@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Plan de acción para la implementación - Ciudad Cariari</title>
+  <style>
+    :root{
+      --bg:#f4f6f8;
+      --panel:#ffffff;
+      --ink:#1f2933;
+      --muted:#5b6773;
+      --line:#d9e0e6;
+      --accent:#245c4f;
+      --accent-2:#3c7a69;
+      --soft:#eaf3f0;
+      --warn:#8a5a00;
+      --danger:#8b2f2f;
+      --ok:#2f6b46;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family:Arial, Helvetica, sans-serif;
+      background:var(--bg);
+      color:var(--ink);
+      line-height:1.5;
+    }
+    header{
+      background:linear-gradient(135deg,var(--accent),var(--accent-2));
+      color:white;
+      padding:28px 22px;
+    }
+    header .wrap, main{max-width:1450px;margin:auto}
+    h1{margin:0 0 8px;font-size:28px}
+    h2{margin:0 0 12px;font-size:22px;color:var(--accent)}
+    h3{margin:0 0 10px;font-size:18px}
+    p{margin:8px 0}
+    .subtitle{opacity:.92;max-width:980px}
+    main{padding:20px}
+    .toolbar,.summary-grid,.meta-grid,.cards{
+      display:grid;
+      gap:12px;
+    }
+    .toolbar{
+      grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+      margin-bottom:16px;
+    }
+    button{
+      border:1px solid var(--accent);
+      background:white;
+      color:var(--accent);
+      padding:10px 12px;
+      border-radius:7px;
+      font-weight:700;
+      cursor:pointer;
+    }
+    button.primary{background:var(--accent);color:white}
+    button.danger{border-color:var(--danger);color:var(--danger)}
+    button:hover{filter:brightness(.97)}
+    .panel{
+      background:var(--panel);
+      border:1px solid var(--line);
+      border-radius:10px;
+      padding:18px;
+      margin-bottom:18px;
+      box-shadow:0 1px 3px rgba(0,0,0,.04);
+    }
+    .meta-grid{
+      grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    }
+    label{font-weight:700;font-size:13px;color:var(--muted)}
+    input,select,textarea{
+      width:100%;
+      border:1px solid var(--line);
+      border-radius:6px;
+      padding:9px;
+      margin-top:5px;
+      font:inherit;
+      background:white;
+    }
+    textarea{min-height:85px;resize:vertical}
+    .summary-grid{
+      grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+    }
+    .metric{
+      background:var(--soft);
+      border-left:5px solid var(--accent);
+      padding:14px;
+      border-radius:8px;
+    }
+    .metric strong{display:block;font-size:25px;color:var(--accent)}
+    .progress{
+      height:12px;background:#e7ecef;border-radius:999px;overflow:hidden;margin-top:8px
+    }
+    .progress > div{height:100%;background:var(--accent);width:0}
+    .section-head{
+      display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap
+    }
+    .tag{
+      display:inline-block;padding:4px 9px;border-radius:999px;background:var(--soft);
+      color:var(--accent);font-size:12px;font-weight:700
+    }
+    .table-wrap{overflow-x:auto;margin-top:12px}
+    table{
+      width:100%;border-collapse:collapse;min-width:1280px;background:white
+    }
+    th,td{
+      border:1px solid var(--line);padding:7px;vertical-align:top;font-size:13px
+    }
+    th{
+      background:#edf3f1;color:#203a34;position:sticky;top:0;z-index:1
+    }
+    td[contenteditable="true"]{background:#fffdf3}
+    td[contenteditable="true"]:focus{outline:2px solid #c7a94d;background:#fff9d7}
+    .small-input{min-width:90px}
+    .status{min-width:125px}
+    .row-actions{white-space:nowrap}
+    .row-actions button{padding:6px 8px;font-size:12px}
+    .note{
+      padding:12px;border-left:4px solid var(--accent);background:var(--soft);border-radius:6px
+    }
+    .check-grid{
+      display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px
+    }
+    .check-item{
+      display:flex;gap:9px;align-items:flex-start;padding:9px;border:1px solid var(--line);border-radius:7px
+    }
+    .check-item input{width:auto;margin-top:4px}
+    .two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    .footer-note{font-size:12px;color:var(--muted)}
+    .hidden{display:none}
+    @media(max-width:900px){.two-col{grid-template-columns:1fr}}
+    @media print{
+      body{background:white}
+      header{background:white;color:black;border-bottom:2px solid #333}
+      .toolbar,.row-actions,.add-row,.filter-panel{display:none!important}
+      main{max-width:none;padding:0}
+      .panel{box-shadow:none;break-inside:avoid}
+      table{min-width:0;font-size:10px}
+      th,td{font-size:10px;padding:4px}
+      input,select,textarea{border:none;padding:0}
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>Plan de acción para la implementación</h1>
+    <div class="subtitle">
+      Propuesta de intervención y segregación del sistema de alcantarillado de Ciudad Cariari,
+      Belén, Heredia. Herramienta editable para planificación, seguimiento y actualización.
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Datos generales del plan</h2>
+    <div class="meta-grid">
+      <div><label>Institución responsable<input id="institucion" value="Municipalidad de Belén"></label></div>
+      <div><label>Persona o unidad coordinadora<input id="coordinador" placeholder="Completar"></label></div>
+      <div><label>Fecha de inicio<input id="fechaInicio" type="date"></label></div>
+      <div><label>Fecha de última actualización<input id="fechaActualizacion" type="date"></label></div>
+      <div><label>Versión del plan<input id="version" value="1.0"></label></div>
+      <div><label>Área de aplicación<input id="area" value="Ciudad Cariari, Belén, Heredia"></label></div>
+    </div>
+    <label>Observaciones generales
+      <textarea id="observacionesGenerales" placeholder="Anotar acuerdos, restricciones, decisiones institucionales o cambios de alcance."></textarea>
+    </label>
+  </section>
+
+  <section class="panel">
+    <h2>Resumen de avance</h2>
+    <div class="summary-grid">
+      <div class="metric"><span>Acciones totales</span><strong id="mTotal">0</strong></div>
+      <div class="metric"><span>Completadas</span><strong id="mCompletadas">0</strong></div>
+      <div class="metric"><span>En curso</span><strong id="mCurso">0</strong></div>
+      <div class="metric"><span>Bloqueadas</span><strong id="mBloqueadas">0</strong></div>
+      <div class="metric"><span>Avance promedio</span><strong id="mAvance">0%</strong>
+        <div class="progress"><div id="barAvance"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel filter-panel">
+    <h2>Filtros</h2>
+    <div class="meta-grid">
+      <div>
+        <label>Mostrar horizonte
+          <select id="filterHorizon" onchange="applyFilters()">
+            <option value="all">Todos</option>
+            <option value="inmediato">Acciones inmediatas</option>
+            <option value="corto">Corto plazo</option>
+            <option value="mediano">Mediano plazo</option>
+            <option value="largo">Largo plazo</option>
+          </select>
+        </label>
+      </div>
+      <div>
+        <label>Mostrar estado
+          <select id="filterStatus" onchange="applyFilters()">
+            <option value="all">Todos</option>
+            <option value="No iniciado">No iniciado</option>
+            <option value="En curso">En curso</option>
+            <option value="Completado">Completado</option>
+            <option value="Bloqueado">Bloqueado</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  </section>
+
+  <div class="toolbar">
+    <button class="primary" onclick="savePlan()">Guardar en este navegador</button>
+    <button onclick="loadPlan()">Cargar datos guardados</button>
+    <button onclick="exportJSON()">Exportar JSON</button>
+    <button onclick="exportCSV()">Exportar acciones CSV</button>
+    <button onclick="window.print()">Imprimir / Guardar PDF</button>
+    <button class="danger" onclick="resetPlan()">Restablecer plantilla</button>
+  </div>
+
+  <div id="actionSections"></div>
+
+  <section class="panel">
+    <h2>Responsables y coordinación institucional</h2>
+    <p class="note">Edite directamente las celdas amarillas. Puede agregar o eliminar actores según las necesidades reales del plan.</p>
+    <div class="table-wrap">
+      <table id="responsablesTable">
+        <thead><tr><th>Actor</th><th>Responsabilidades principales</th><th>Persona de contacto</th><th>Medio de contacto</th><th class="row-actions">Acción</th></tr></thead>
+        <tbody>
+          <tr><td contenteditable="true">Municipalidad de Belén</td><td contenteditable="true">Coordinación, inspección, mantenimiento, contratación, supervisión y seguimiento.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Propietarios</td><td contenteditable="true">Facilitar el acceso, corregir conexiones internas y mantener sus sistemas sanitarios.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Asociación de Desarrollo Integral</td><td contenteditable="true">Comunicación, coordinación comunitaria y apoyo en actividades de divulgación.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Empresas contratistas</td><td contenteditable="true">Ejecutar limpieza especializada, inspección con cámara y obras constructivas.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Laboratorios</td><td contenteditable="true">Realizar análisis fisicoquímicos y microbiológicos.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Equipo técnico</td><td contenteditable="true">Actualizar mapas, modelos, diseños y criterios de priorización.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Operador sanitario</td><td contenteditable="true">Verificar la capacidad y autorizar nuevas conexiones.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Comunidad</td><td contenteditable="true">Reportar problemas y colaborar con el cuidado de la infraestructura.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <button class="add-row" onclick="addGenericRow('responsablesTable',4)">Agregar actor</button>
+  </section>
+
+  <section class="panel">
+    <h2>Indicadores generales de seguimiento</h2>
+    <div class="table-wrap">
+      <table id="indicadoresTable">
+        <thead><tr><th>Componente</th><th>Indicador</th><th>Línea base</th><th>Meta</th><th>Resultado actual</th><th>Frecuencia</th><th>Fuente de verificación</th><th class="row-actions">Acción</th></tr></thead>
+        <tbody>
+          <tr><td contenteditable="true">Accesibilidad</td><td contenteditable="true">Porcentaje de cajas accesibles respecto al total.</td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true">Semestral</td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Recuperación de estructuras</td><td contenteditable="true">Número de cajas liberadas, reparadas o sustituidas.</td><td contenteditable="true">36 cajas asfaltadas</td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true">Semestral</td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Mantenimiento</td><td contenteditable="true">Número de estructuras limpiadas por año.</td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true">Anual</td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Caracterización de la red</td><td contenteditable="true">Porcentaje de conductos con diámetro, pendiente y material conocido.</td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true">Anual</td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Flujo en tiempo seco</td><td contenteditable="true">Número de cajas con flujo persistente.</td><td contenteditable="true">38 cajas</td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true">Semestral</td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Conexiones no autorizadas</td><td contenteditable="true">Número de conexiones confirmadas y corregidas.</td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true">Trimestral</td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Calidad del agua</td><td contenteditable="true">Variación de DBO, DQO, SAAM e indicadores microbiológicos.</td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true">Por campaña</td><td contenteditable="true">Informes de laboratorio</td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Desfogues</td><td contenteditable="true">Número de puntos accesibles, monitoreados y rehabilitados.</td><td contenteditable="true">14 desfogues</td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true">Semestral</td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Modelación</td><td contenteditable="true">Porcentaje de la red incorporada con información verificada.</td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true">Anual</td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Soluciones basadas en la naturaleza</td><td contenteditable="true">Área implementada y volumen de escorrentía gestionado.</td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true">Anual</td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Participación comunitaria</td><td contenteditable="true">Número de actividades informativas y reportes recibidos.</td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true"></td><td contenteditable="true">Anual</td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Cumplimiento</td><td contenteditable="true">Porcentaje de acciones ejecutadas según el cronograma.</td><td contenteditable="true"></td><td contenteditable="true">100%</td><td contenteditable="true"></td><td contenteditable="true">Trimestral</td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <button class="add-row" onclick="addGenericRow('indicadoresTable',7)">Agregar indicador</button>
+  </section>
+
+  <section class="panel">
+    <h2>Clasificación preliminar de costos</h2>
+    <div class="table-wrap">
+      <table id="costosTable" style="min-width:800px">
+        <thead><tr><th>Nivel</th><th>Tipo de actividad</th><th>Rango estimado</th><th>Criterio de actualización</th><th class="row-actions">Acción</th></tr></thead>
+        <tbody>
+          <tr><td contenteditable="true">Bajo</td><td contenteditable="true">Inspección visual, señalización, actualización de registros y seguimiento.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Bajo a medio</td><td contenteditable="true">Limpieza, reparación menor y monitoreo.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Medio</td><td contenteditable="true">Liberación de estructuras, análisis de laboratorio y levantamientos técnicos.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Medio a alto</td><td contenteditable="true">Inspección con cámara, rehabilitación de cajas y estabilización de desfogues.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Alto</td><td contenteditable="true">Sustitución de tuberías, ampliación de conductos y nuevas conexiones sanitarias.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+          <tr><td contenteditable="true">Variable</td><td contenteditable="true">Obras dentro de propiedades privadas o sistemas individuales de tratamiento.</td><td contenteditable="true"></td><td contenteditable="true"></td><td class="row-actions"><button onclick="deleteRow(this)">Eliminar</button></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <button class="add-row" onclick="addGenericRow('costosTable',4)">Agregar categoría</button>
+  </section>
+
+  <section class="panel">
+    <h2>Requerimientos para la ejecución</h2>
+    <p>Marque los requerimientos conforme sean completados y agregue observaciones cuando corresponda.</p>
+    <div class="check-grid" id="requirements"></div>
+    <label>Observaciones sobre requerimientos
+      <textarea id="requirementsNotes"></textarea>
+    </label>
+  </section>
+
+  <section class="panel">
+    <h2>Seguimiento y actualización anual</h2>
+    <div class="check-grid" id="annualReview"></div>
+    <div class="two-col" style="margin-top:12px">
+      <label>Fecha de la próxima revisión<input id="nextReview" type="date"></label>
+      <label>Responsable de la revisión<input id="reviewOwner"></label>
+    </div>
+    <label>Acuerdos y ajustes derivados de la revisión
+      <textarea id="reviewNotes"></textarea>
+    </label>
+  </section>
+
+  <section class="panel">
+    <h2>Síntesis actualizada del plan</h2>
+    <textarea id="synthesis" style="min-height:180px">El plan de acción propone iniciar con actividades de recuperación, limpieza y caracterización, debido a que estas acciones permiten obtener información indispensable para las etapas posteriores. Una vez completada la inspección, se podrán confirmar las conexiones, definir las reparaciones y ejecutar las obras de segregación y redireccionamiento.
+
+La implementación gradual reduce el riesgo de invertir en intervenciones que no respondan a las causas reales del problema. Asimismo, facilita distribuir los recursos y ajustar las decisiones conforme se obtiene información más precisa.
+
+La ejecución del plan permitirá avanzar hacia un sistema de alcantarillado pluvial más accesible, controlado y separado de los aportes residuales. Además, fortalecerá el monitoreo de los desfogues y la protección de los ríos Bermúdez y Virilla.</textarea>
+    <p class="footer-note">La información se guarda localmente en el navegador. Para respaldo institucional, utilice las funciones de exportación.</p>
+  </section>
+</main>
+
+<script>
+const horizons = [
+  {
+    id:"inmediato",
+    title:"Acciones inmediatas",
+    period:"0 a 6 meses",
+    description:"Recuperar el acceso al sistema, reducir riesgos operativos y completar la información básica.",
+    actions:[
+      ["Actualizar el inventario georreferenciado","Cajas, conductos y desfogues","Municipalidad de Belén","Base de datos actualizada","0 a 3 meses","Bajo"],
+      ["Señalizar las estructuras identificadas","83 cajas de registro","Municipalidad de Belén","Porcentaje de cajas señalizadas","0 a 3 meses","Bajo"],
+      ["Liberar cajas cubiertas por asfalto","36 cajas registradas","Municipalidad de Belén y contratista","Número de cajas liberadas","0 a 6 meses","Medio"],
+      ["Limpiar cajas y conductos accesibles","Estructuras con sedimentos o residuos","Municipalidad de Belén","Número de estructuras limpiadas","0 a 6 meses","Bajo a medio"],
+      ["Verificar la condición de las tapas y marcos","Estructuras accesibles","Municipalidad de Belén","Número de tapas reparadas o sustituidas","0 a 6 meses","Medio"],
+      ["Reinspeccionar las cajas con flujo en tiempo seco","38 cajas registradas","Municipalidad de Belén y equipo técnico","Número de puntos reinspeccionados","0 a 6 meses","Bajo"],
+      ["Registrar condiciones de los desfogues","14 puntos de salida","Municipalidad de Belén","Fichas de inspección completadas","0 a 6 meses","Bajo"],
+      ["Priorizar accesos seguros a los desfogues","Puntos con acceso limitado","Municipalidad de Belén","Número de accesos evaluados","0 a 6 meses","Bajo a medio"]
+    ]
+  },
+  {
+    id:"corto",
+    title:"Acciones de corto plazo",
+    period:"6 a 18 meses",
+    description:"Completar la caracterización de la red y verificar los sectores con posibles aportes distintos a la escorrentía pluvial.",
+    actions:[
+      ["Medir diámetros, profundidades y cotas","Cajas y conductos priorizados","Equipo técnico municipal o consultoría","Porcentaje de tramos caracterizados","6 a 12 meses","Medio"],
+      ["Inspeccionar conductos mediante cámara","Tramos con continuidad desconocida","Municipalidad de Belén o empresa especializada","Metros de tubería inspeccionados","6 a 18 meses","Medio a alto"],
+      ["Realizar pruebas con trazadores","Sectores con flujo persistente","Equipo técnico y propietarios","Número de pruebas realizadas","6 a 18 meses","Medio"],
+      ["Monitorear calidad del agua","Cajas y desfogues prioritarios","Laboratorio y Municipalidad de Belén","Número de campañas ejecutadas","6 a 18 meses","Medio"],
+      ["Establecer puntos permanentes de control","Cajas y desfogues seleccionados","Municipalidad de Belén","Número de puntos establecidos","6 a 12 meses","Bajo a medio"],
+      ["Verificar acometidas residenciales","Propiedades vinculadas con descargas sospechosas","Municipalidad y propietarios","Número de acometidas verificadas","6 a 18 meses","Medio"],
+      ["Evaluar la capacidad del sistema sanitario receptor","Sectores donde se proponga redireccionamiento","Municipalidad de Belén","Informe de capacidad disponible","6 a 18 meses","Medio"],
+      ["Actualizar el modelo del sistema","Subcuencas, nodos, conductos y desfogues","Equipo técnico","Modelo actualizado","12 a 18 meses","Medio"]
+    ]
+  },
+  {
+    id:"mediano",
+    title:"Acciones de mediano plazo",
+    period:"18 a 36 meses",
+    description:"Ejecutar intervenciones físicas que requieren diseños, coordinación institucional y recursos superiores.",
+    actions:[
+      ["Reparar o sustituir estructuras deterioradas","Cajas, tragantes y pozos priorizados","Municipalidad de Belén y contratista","Número de estructuras rehabilitadas","18 a 30 meses","Medio a alto"],
+      ["Corregir conexiones no autorizadas confirmadas","Propiedades o ramales identificados","Propietarios y Municipalidad","Número de conexiones corregidas","18 a 36 meses","Variable"],
+      ["Redireccionar aguas residuales hacia un receptor autorizado","Sectores con conexión confirmada","Municipalidad, propietarios y operador sanitario","Porcentaje de aportes redireccionados","18 a 36 meses","Alto"],
+      ["Reparar o sustituir conductos dañados","Tramos con deterioro comprobado","Municipalidad de Belén","Metros de tubería rehabilitados","18 a 36 meses","Alto"],
+      ["Mejorar estructuras de captación","Corredores de acumulación","Municipalidad de Belén","Número de estructuras mejoradas","18 a 36 meses","Medio a alto"],
+      ["Estabilizar puntos de desfogue","Salidas con erosión o deterioro","Municipalidad de Belén","Número de desfogues estabilizados","18 a 36 meses","Medio a alto"],
+      ["Implementar medidas iniciales de SbN","Sitios seleccionados","Municipalidad y organizaciones locales","Número de proyectos piloto","24 a 36 meses","Medio"],
+      ["Verificar la efectividad de las intervenciones","Puntos de control aguas abajo","Municipalidad y laboratorio","Comparación antes y después","18 a 36 meses","Medio"]
+    ]
+  },
+  {
+    id:"largo",
+    title:"Acciones de largo plazo",
+    period:"Más de 36 meses",
+    description:"Consolidar la mejora del sistema y establecer una gestión preventiva y permanente.",
+    actions:[
+      ["Ampliar conductos con capacidad insuficiente comprobada","Tramos definidos mediante modelación","Municipalidad de Belén","Metros de tubería ampliados","Más de 36 meses","Alto"],
+      ["Construir nuevas estructuras de captación","Sectores con déficit comprobado","Municipalidad de Belén","Número de nuevas estructuras","Más de 36 meses","Alto"],
+      ["Expandir las soluciones basadas en la naturaleza","Áreas verdes y espacios públicos","Municipalidad y comunidades","Área intervenida con SbN","Más de 36 meses","Medio a alto"],
+      ["Integrar el sistema en la planificación urbana","Área de Ciudad Cariari","Municipalidad de Belén","Instrumentos de planificación actualizados","Más de 36 meses","Medio"],
+      ["Establecer un programa permanente de mantenimiento","Red completa","Municipalidad de Belén","Cumplimiento anual del programa","Permanente","Medio"],
+      ["Consolidar el monitoreo de los desfogues","Ríos Bermúdez y Virilla","Municipalidad y laboratorios","Número de campañas anuales","Permanente","Medio"],
+      ["Actualizar periódicamente la modelación","Subcuencas y red pluvial","Municipalidad de Belén","Modelo actualizado cada periodo definido","Periódico","Medio"],
+      ["Evaluar la replicabilidad en otros sectores","Cantón de Belén","Municipalidad de Belén","Número de sectores evaluados","Más de 36 meses","Bajo a medio"]
+    ]
+  }
+];
+
+const requirementsList = [
+  "Validación del inventario de infraestructura.",
+  "Levantamiento de cotas y dimensiones.",
+  "Actualización de la representación digital de la red.",
+  "Confirmación de las conexiones no autorizadas.",
+  "Verificación de la capacidad del sistema sanitario.",
+  "Diseño hidráulico y constructivo de las obras.",
+  "Autorización para intervenir propiedades privadas.",
+  "Asignación presupuestaria.",
+  "Contratación de personal o empresas especializadas.",
+  "Gestión de permisos ambientales y constructivos.",
+  "Establecimiento de protocolos de seguridad.",
+  "Definición de un programa de mantenimiento posterior."
+];
+
+const annualList = [
+  "Actualizar el inventario.",
+  "Revisar el avance de las acciones.",
+  "Analizar los indicadores.",
+  "Incorporar nuevas estructuras.",
+  "Actualizar los costos.",
+  "Revisar la prioridad de los puntos.",
+  "Evaluar la calidad de las descargas.",
+  "Ajustar el cronograma.",
+  "Realizar inspecciones extraordinarias después de lluvias intensas."
+];
+
+function statusSelect(value="No iniciado"){
+  return `<select class="status" onchange="updateSummary();applyFilters()">
+    <option ${value==="No iniciado"?"selected":""}>No iniciado</option>
+    <option ${value==="En curso"?"selected":""}>En curso</option>
+    <option ${value==="Completado"?"selected":""}>Completado</option>
+    <option ${value==="Bloqueado"?"selected":""}>Bloqueado</option>
+  </select>`;
+}
+
+function createActionRow(hid, a){
+  return `<tr data-horizon="${hid}">
+    <td contenteditable="true">${a[0]||""}</td>
+    <td contenteditable="true">${a[1]||""}</td>
+    <td contenteditable="true">${a[2]||""}</td>
+    <td contenteditable="true">${a[3]||""}</td>
+    <td contenteditable="true">${a[4]||""}</td>
+    <td contenteditable="true">${a[5]||""}</td>
+    <td>${statusSelect()}</td>
+    <td><input class="small-input avance" type="number" min="0" max="100" value="0" onchange="clamp(this);updateSummary()">%</td>
+    <td><input type="date" class="fecha-meta"></td>
+    <td contenteditable="true"></td>
+    <td contenteditable="true"></td>
+    <td class="row-actions"><button onclick="deleteActionRow(this)">Eliminar</button></td>
+  </tr>`;
+}
+
+function renderSections(){
+  const root=document.getElementById("actionSections");
+  root.innerHTML="";
+  horizons.forEach(h=>{
+    const sec=document.createElement("section");
+    sec.className="panel action-section";
+    sec.dataset.horizon=h.id;
+    sec.innerHTML=`
+      <div class="section-head">
+        <div><h2>${h.title}</h2><p>${h.description}</p></div>
+        <span class="tag">${h.period}</span>
+      </div>
+      <div class="table-wrap">
+        <table class="action-table" id="table-${h.id}">
+          <thead><tr>
+            <th>Acción</th><th>Elementos o sectores</th><th>Responsable propuesto</th>
+            <th>Indicador</th><th>Plazo referencial</th><th>Costo relativo</th>
+            <th>Estado</th><th>Avance</th><th>Fecha meta</th><th>Evidencia / resultado</th>
+            <th>Observaciones</th><th class="row-actions">Acción</th>
+          </tr></thead>
+          <tbody>${h.actions.map(a=>createActionRow(h.id,a)).join("")}</tbody>
+        </table>
+      </div>
+      <button class="add-row" onclick="addActionRow('${h.id}')">Agregar acción</button>`;
+    root.appendChild(sec);
+  });
+}
+
+function renderChecks(){
+  document.getElementById("requirements").innerHTML=requirementsList.map((t,i)=>
+    `<label class="check-item"><input type="checkbox" id="req-${i}"><span contenteditable="true">${t}</span></label>`).join("");
+  document.getElementById("annualReview").innerHTML=annualList.map((t,i)=>
+    `<label class="check-item"><input type="checkbox" id="annual-${i}"><span contenteditable="true">${t}</span></label>`).join("");
+}
+
+function addActionRow(hid){
+  const tbody=document.querySelector(`#table-${hid} tbody`);
+  tbody.insertAdjacentHTML("beforeend",createActionRow(hid,["","","","","","",""]));
+  updateSummary();
+}
+function deleteActionRow(btn){
+  if(confirm("¿Eliminar esta acción?")){btn.closest("tr").remove();updateSummary();}
+}
+function deleteRow(btn){
+  if(confirm("¿Eliminar esta fila?")) btn.closest("tr").remove();
+}
+function addGenericRow(tableId, editableCols){
+  const table=document.getElementById(tableId);
+  const tr=document.createElement("tr");
+  for(let i=0;i<editableCols;i++){
+    const td=document.createElement("td");td.contentEditable="true";tr.appendChild(td);
+  }
+  const action=document.createElement("td");
+  action.className="row-actions";
+  action.innerHTML='<button onclick="deleteRow(this)">Eliminar</button>';
+  tr.appendChild(action);
+  table.querySelector("tbody").appendChild(tr);
+}
+function clamp(el){el.value=Math.max(0,Math.min(100,Number(el.value)||0));}
+
+function updateSummary(){
+  const rows=[...document.querySelectorAll(".action-table tbody tr")];
+  let completed=0,course=0,blocked=0,totalProgress=0;
+  rows.forEach(r=>{
+    const s=r.querySelector(".status").value;
+    const p=Number(r.querySelector(".avance").value)||0;
+    totalProgress+=p;
+    if(s==="Completado")completed++;
+    if(s==="En curso")course++;
+    if(s==="Bloqueado")blocked++;
+  });
+  const avg=rows.length?Math.round(totalProgress/rows.length):0;
+  document.getElementById("mTotal").textContent=rows.length;
+  document.getElementById("mCompletadas").textContent=completed;
+  document.getElementById("mCurso").textContent=course;
+  document.getElementById("mBloqueadas").textContent=blocked;
+  document.getElementById("mAvance").textContent=avg+"%";
+  document.getElementById("barAvance").style.width=avg+"%";
+}
+
+function applyFilters(){
+  const h=document.getElementById("filterHorizon").value;
+  const s=document.getElementById("filterStatus").value;
+  document.querySelectorAll(".action-section").forEach(sec=>{
+    sec.classList.toggle("hidden",h!=="all" && sec.dataset.horizon!==h);
+  });
+  document.querySelectorAll(".action-table tbody tr").forEach(row=>{
+    const matchH=h==="all" || row.dataset.horizon===h;
+    const matchS=s==="all" || row.querySelector(".status").value===s;
+    row.style.display=(matchH&&matchS)?"":"none";
+  });
+}
+
+function tableToArray(table){
+  return [...table.querySelectorAll("tbody tr")].map(row=>
+    [...row.cells].slice(0,-1).map(cell=>{
+      const sel=cell.querySelector("select");
+      const inp=cell.querySelector("input");
+      return sel?sel.value:(inp?inp.value:cell.innerText.trim());
+    })
+  );
+}
+
+function collectData(){
+  const fields=["institucion","coordinador","fechaInicio","fechaActualizacion","version","area",
+  "observacionesGenerales","requirementsNotes","nextReview","reviewOwner","reviewNotes","synthesis"];
+  const data={meta:{},actions:{},tables:{},checks:{requirements:[],annual:[]}};
+  fields.forEach(id=>data.meta[id]=document.getElementById(id).value);
+  horizons.forEach(h=>data.actions[h.id]=tableToArray(document.getElementById(`table-${h.id}`)));
+  data.tables.responsables=tableToArray(document.getElementById("responsablesTable"));
+  data.tables.indicadores=tableToArray(document.getElementById("indicadoresTable"));
+  data.tables.costos=tableToArray(document.getElementById("costosTable"));
+  requirementsList.forEach((_,i)=>data.checks.requirements.push(document.getElementById(`req-${i}`).checked));
+  annualList.forEach((_,i)=>data.checks.annual.push(document.getElementById(`annual-${i}`).checked));
+  return data;
+}
+
+function savePlan(){
+  localStorage.setItem("planCariari",JSON.stringify(collectData()));
+  alert("Plan guardado en este navegador.");
+}
+
+function setGenericTable(tableId, rows, editableCols){
+  const tbody=document.querySelector(`#${tableId} tbody`);
+  tbody.innerHTML="";
+  rows.forEach(r=>{
+    const tr=document.createElement("tr");
+    for(let i=0;i<editableCols;i++){
+      const td=document.createElement("td");td.contentEditable="true";td.textContent=r[i]||"";tr.appendChild(td);
+    }
+    const a=document.createElement("td");a.className="row-actions";
+    a.innerHTML='<button onclick="deleteRow(this)">Eliminar</button>';tr.appendChild(a);tbody.appendChild(tr);
+  });
+}
+
+function loadPlan(){
+  const raw=localStorage.getItem("planCariari");
+  if(!raw){alert("No hay datos guardados.");return;}
+  const data=JSON.parse(raw);
+  Object.entries(data.meta||{}).forEach(([id,v])=>{const e=document.getElementById(id);if(e)e.value=v||"";});
+  horizons.forEach(h=>{
+    const tbody=document.querySelector(`#table-${h.id} tbody`);
+    tbody.innerHTML="";
+    (data.actions?.[h.id]||[]).forEach(r=>{
+      const a=r.slice(0,6);
+      const status=r[6]||"No iniciado", progress=r[7]||0, date=r[8]||"", evidence=r[9]||"", obs=r[10]||"";
+      tbody.insertAdjacentHTML("beforeend",createActionRow(h.id,a));
+      const row=tbody.lastElementChild;
+      row.querySelector(".status").value=status;
+      row.querySelector(".avance").value=progress;
+      row.querySelector(".fecha-meta").value=date;
+      row.cells[9].textContent=evidence;
+      row.cells[10].textContent=obs;
+    });
+  });
+  if(data.tables){
+    setGenericTable("responsablesTable",data.tables.responsables||[],4);
+    setGenericTable("indicadoresTable",data.tables.indicadores||[],7);
+    setGenericTable("costosTable",data.tables.costos||[],4);
+  }
+  (data.checks?.requirements||[]).forEach((v,i)=>{const e=document.getElementById(`req-${i}`);if(e)e.checked=v;});
+  (data.checks?.annual||[]).forEach((v,i)=>{const e=document.getElementById(`annual-${i}`);if(e)e.checked=v;});
+  updateSummary();applyFilters();
+  alert("Datos cargados.");
+}
+
+function download(filename,content,type){
+  const blob=new Blob([content],{type});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");a.href=url;a.download=filename;a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function exportJSON(){
+  download("plan_accion_ciudad_cariari.json",JSON.stringify(collectData(),null,2),"application/json");
+}
+function csvEscape(v){return `"${String(v??"").replaceAll('"','""')}"`;}
+function exportCSV(){
+  const rows=[["Horizonte","Acción","Elementos o sectores","Responsable","Indicador","Plazo","Costo","Estado","Avance (%)","Fecha meta","Evidencia / resultado","Observaciones"]];
+  horizons.forEach(h=>{
+    tableToArray(document.getElementById(`table-${h.id}`)).forEach(r=>rows.push([h.title,...r]));
+  });
+  const csv="\uFEFF"+rows.map(r=>r.map(csvEscape).join(",")).join("\n");
+  download("acciones_plan_ciudad_cariari.csv",csv,"text/csv;charset=utf-8");
+}
+function resetPlan(){
+  if(confirm("¿Restablecer la plantilla? Se perderán los cambios no exportados.")){
+    localStorage.removeItem("planCariari");
+    location.reload();
+  }
+}
+renderSections();
+renderChecks();
+updateSummary();
+document.getElementById("fechaActualizacion").value=new Date().toISOString().slice(0,10);
+</script>
+</body>
+</html>

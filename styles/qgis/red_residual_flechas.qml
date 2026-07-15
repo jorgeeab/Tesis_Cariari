@@ -154,7 +154,7 @@
             <Option name="type" type="QString" value="collection"/>
           </Option>
         </data_defined_properties>
-        <layer class="SimpleMarker" enabled="1" id="{36a7c5b2-a333-4870-8d8a-4ca42aba824b}" locked="0" pass="0">
+        <layer class="SimpleMarker" enabled="1" id="{25a6fa77-0b7b-4618-9d73-e6688721afbc}" locked="0" pass="0">
           <Option type="Map">
             <Option name="angle" type="QString" value="0"/>
             <Option name="cap_style" type="QString" value="square"/>

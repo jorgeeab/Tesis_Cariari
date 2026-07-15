@@ -144,9 +144,10 @@ CACHE_TEX = OUT_DIR / "_cache_texturas"
 CAUCE_SHP        = Path("Arcgis shapes y curvas/Cauce.shp")
 OSM_KML          = Path("Arcgis shapes y curvas/Open Street Map & Cariari, etc.kml")
 ZONAS_VERDES_KML = Path("Arcgis shapes y curvas/Zonas Verdes.kml")
-TRAGANTES_SHP    = Path("Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Tragantes.shp")
-CRP_SHP          = Path("Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRP.shp")
-CRN_SHP          = Path("Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRN_CAPA.shp")
+# jul 2026: capas renombradas/actualizadas por el usuario (los nombres viejos ya no existen)
+TRAGANTES_SHP    = Path("Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Tragantes (2).shp")
+CRP_SHP          = Path("Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRP actualizado/CRP actualizado.shp")
+CRN_SHP          = Path("Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/CRN (2).shp")
 DESFOGUES_SHP    = Path("Arcgis shapes y curvas/Desfogues.shp")
 OPEN_BUILDINGS_GEOJSON = CACHE_OVERTURE / "building_test.geojson"
 OUT_HTML         = OUT_DIR / "Refinado_30_ThreeJS_Cortina_Ajustada.html"
