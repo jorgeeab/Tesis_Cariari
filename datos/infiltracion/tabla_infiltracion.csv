@@ -1,0 +1,26 @@
+categoria,item,parametro,valor,unidad,fuente
+green_ampt,arena,ksat,120.4,mm/h,Rawls et al. 1983 (en Rossman & Huber 2016)
+green_ampt,arena_francosa,ksat,30.0,mm/h,Rawls et al. 1983 (en Rossman & Huber 2016)
+green_ampt,franco_arenoso,ksat,10.9,mm/h,Rawls et al. 1983 (en Rossman & Huber 2016)
+green_ampt,franco_arenoso,succion,110,mm,Rawls et al. 1983 (en Rossman & Huber 2016)
+green_ampt,franco_arenoso,porosidad_efectiva,0.412,adimensional,Rawls et al. 1983 (en Rossman & Huber 2016)
+green_ampt,franco,ksat,3.3,mm/h,Rawls et al. 1983 (en Rossman & Huber 2016)
+green_ampt,franco_limoso,ksat,6.6,mm/h,Rawls et al. 1983 (en Rossman & Huber 2016)
+green_ampt,franco_arcillo_arenoso,ksat,1.5,mm/h,Rawls et al. 1983 (en Rossman & Huber 2016)
+green_ampt,franco_arcilloso,ksat,1.0,mm/h,Rawls et al. 1983 (en Rossman & Huber 2016)
+green_ampt,arcilla_limosa,ksat,0.5,mm/h,Rawls et al. 1983 (en Rossman & Huber 2016)
+green_ampt,arcilla,ksat,0.3,mm/h,Rawls et al. 1983 (en Rossman & Huber 2016)
+medicion_local,san_rafael_alajuela_limo_MH,doble_anillo_tasa_global,2.1-4.5,mm/h,Macías et al. 2018 (Rev. Geol. Am. Central 59)
+medicion_local,san_rafael_alajuela_limo_MH,porchet,10-60,mm/h,Macías et al. 2018 (Rev. Geol. Am. Central 59)
+medicion_local,sabanilla_limo_arenoso_MH_ML,doble_anillo_tasa_global,45-99,mm/h,Macías et al. 2018 (Rev. Geol. Am. Central 59)
+medicion_local,sabanilla_limo_arenoso_MH_ML,porchet,158-1086,mm/h,Macías et al. 2018 (Rev. Geol. Am. Central 59)
+modelo_adoptado,swmm_green_ampt,ksat,5.0,mm/h,Franco arenoso Rawls reducido 50% por compactación urbana; coherente con Macías et al. 2018
+modelo_adoptado,swmm_green_ampt,succion,110,mm,Rawls et al. 1983 franco arenoso
+modelo_adoptado,swmm_green_ampt,deficit_inicial,0.25,adimensional,valor inicial de calibración
+modelo_d8,techos,infiltracion,2,%,equivale a C=0.98; techos C 0.75-0.95 (Chow et al. 1994)
+modelo_d8,calles,infiltracion,6,%,equivale a C=0.94; asfalto/concreto C 0.85-0.95 (Chow et al. 1994)
+modelo_d8,suelo_abierto,infiltracion,22,%,equivale a C=0.78; residencial denso C 0.60-0.85 (Chow et al. 1994)
+modelo_d8,vegetacion,infiltracion,90,%,equivale a C=0.10; parques C 0.10-0.35 (Chow et al. 1994)
+clasificacion_tesis,alta,umbral,>50,mm/h,Tabla 16 Resultados (base Zeleňáková et al. 2020)
+clasificacion_tesis,media,umbral,10-50,mm/h,Tabla 16 Resultados (base Zeleňáková et al. 2020)
+clasificacion_tesis,baja,umbral,<10,mm/h,Tabla 16 Resultados (base Zeleňáková et al. 2020)

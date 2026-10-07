@@ -2,8 +2,17 @@
 __pycache__/
 *.pyc
 
-# GIS source data and caches stay local (demasiado grandes para git)
-Arcgis shapes y curvas/
+# Insumos SIG originales: la carpeta va a git (ver INVENTARIO_INSUMOS_TESIS.md),
+# salvo los archivos que superan el limite de 100 MB de GitHub, que quedan locales
+/Arcgis shapes y curvas/Cauce.dbf
+/Arcgis shapes y curvas/Curvas intermedias 1 25.dbf
+/Arcgis shapes y curvas/Imagen Satelital_TESIS.jpg
+/Arcgis shapes y curvas/Imagen Satelital_TESIS.jpg.ovr
+/Arcgis shapes y curvas.zip
+# Fotos personales (vivienda particular), no son insumos del modelo
+/Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/WhatsApp Unknown*
+
+# Caches regenerables (descargas WFS/OSM/teselas) quedan locales
 resultados_refinados/_cache_*/
 resultados_refinados/_vendor_*/
 resultados_refinados/*.geojson

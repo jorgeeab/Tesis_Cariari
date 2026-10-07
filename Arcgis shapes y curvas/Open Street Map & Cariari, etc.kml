@@ -1,0 +1,543 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2" xmlns:dtx="http://duweis.com/kml/ext/1.0.xsd">
+  <Document id="com.duweis.root">
+    <name>Data</name>
+    <open>1</open>
+
+    <Style id="style1">
+      <LineStyle>
+        <width>3</width>
+        <color>ff007aff</color>
+      </LineStyle>
+      <PolyStyle>
+        <color>80007aff</color>
+      </PolyStyle>
+    </Style>
+
+    <Style id="style2">
+      <IconStyle>
+        <scale>1</scale>
+      </IconStyle>
+      <LabelStyle>
+        <scale>0</scale>
+      </LabelStyle>
+    </Style>
+
+    <Style id="style3">
+      <LineStyle>
+        <width>3</width>
+        <color>ff007aff</color>
+      </LineStyle>
+    </Style>
+
+    <Placemark>
+      <name>Cariari </name>
+      <visibility>0</visibility>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Size</b></td>
+    <td>1,01&nbsp;km&nbsp;×&nbsp;1,05&nbsp;km</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Perimeter</b></td>
+    <td>3,26&nbsp;km</td>
+  </tr>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Area</b></td>
+    <td>0,7&nbsp;km²</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style1</styleUrl>
+      <Polygon>
+        <extrude>1</extrude>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              -84.16655003,9.97646194
+              -84.17062502,9.97540687
+              -84.17122016,9.97201410
+              -84.16993885,9.96884886
+              -84.16661304,9.96694556
+              -84.16296516,9.96742828
+              -84.16197792,9.97090386
+              -84.16429967,9.97234510
+              -84.16655003,9.97646194</coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 07:49</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Calle&nbsp;152,&nbsp;San&nbsp;Jose,&nbsp;Heredia
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'43.27",&nbsp;W&nbsp;84°11'7.67"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>915&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.18546326,9.97868730,915</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 08:22</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Calle&nbsp;100,&nbsp;San&nbsp;Jose,&nbsp;Heredia
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'30.35",&nbsp;W&nbsp;84°9'48.39"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>946&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.16344044,9.97509705,946</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>My Path 1</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Distance</b></td>
+    <td>224&nbsp;m</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Points</b></td>
+    <td>2</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style3</styleUrl>
+      <LineString>
+        <coordinates>
+          -84.16220730,9.97674104
+          -84.16346410,9.97514084</coordinates>
+      </LineString>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 08:42</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Calle&nbsp;102A,&nbsp;San&nbsp;Jose,&nbsp;Heredia
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'29.60",&nbsp;W&nbsp;84°9'50.70"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>948&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.16408420,9.97488982,948</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 08:52</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Calle&nbsp;112,&nbsp;San&nbsp;Jose,&nbsp;Heredia
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'28.03",&nbsp;W&nbsp;84°10'5.92"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>941&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.16831235,9.97445192,941</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 09:02</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Avenida&nbsp;54,&nbsp;San&nbsp;Jose,&nbsp;Heredia
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'27.28",&nbsp;W&nbsp;84°10'11.67"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>938&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.16990883,9.97424402,938</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 09:24</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Avenida&nbsp;70,&nbsp;San&nbsp;Jose
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'2.64",&nbsp;W&nbsp;84°9'53.53"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>958&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.16486998,9.96740118,958</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 09:30</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Calle&nbsp;116,&nbsp;San&nbsp;Jose
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'2.76",&nbsp;W&nbsp;84°10'2.98"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>945&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.16749465,9.96743398,945</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 09:41</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Avenida&nbsp;70,&nbsp;San&nbsp;Jose
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'1.11",&nbsp;W&nbsp;84°10'3.02"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>938&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.16750599,9.96697479,938</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 10:18</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Cariari&nbsp;Country&nbsp;Club&nbsp;-&nbsp;Campo&nbsp;de&nbsp;Golf,&nbsp;Calle&nbsp;88,&nbsp;San&nbsp;Jose,&nbsp;Heredia
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'28.20",&nbsp;W&nbsp;84°9'36.30"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>956&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.16008261,9.97450008,956</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 10:55</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Cariari&nbsp;Country&nbsp;Club&nbsp;-&nbsp;Campo&nbsp;de&nbsp;Golf,&nbsp;San&nbsp;Jose,&nbsp;Heredia
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'24.81",&nbsp;W&nbsp;84°9'28.86"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>953&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.15801592,9.97355706,953</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 10:55</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Cariari&nbsp;Country&nbsp;Club&nbsp;-&nbsp;Campo&nbsp;de&nbsp;Golf,&nbsp;San&nbsp;Jose,&nbsp;Heredia
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'24.81",&nbsp;W&nbsp;84°9'28.86"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>953&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.15801592,9.97355706,953</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 11:09</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Cariari&nbsp;Country&nbsp;Club&nbsp;-&nbsp;Campo&nbsp;de&nbsp;Golf,&nbsp;San&nbsp;Jose,&nbsp;Heredia
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'24.89",&nbsp;W&nbsp;84°9'31.43"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>956&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.15872982,9.97358079,956</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 11:09</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+Cariari&nbsp;Country&nbsp;Club&nbsp;-&nbsp;Campo&nbsp;de&nbsp;Golf,&nbsp;San&nbsp;Jose,&nbsp;Heredia
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'24.89",&nbsp;W&nbsp;84°9'31.43"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>956&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.15872982,9.97358079,956</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>2021-09-24 11:14</name>
+      <description><![CDATA[<style>
+table{border-collapse:collapse; margin:5 5 10 0px;}
+table td{border: 1px solid #e0e0e0; padding:5px;}
+table .head {font-weight: bold; background-color:#f9f8f8;}
+table .light {background-color: #f9f8f8;}
+table .dark {background-color: #f3f2f2;}
+.datatablebox table {max-width=600px; margin:5 5 5 0px;}
+</style>
+<div id="com.miocool.mapplus.subtitle">
+San&nbsp;Jose,&nbsp;Heredia
+</div>
+<br/>
+<div id="mapplus-base-properties" class="datatablebox">
+<table>
+  <tr style="background-color: #f9f8f8;">
+    <td><b>Coordinate</b></td>
+    <td>N&nbsp;9°58'25.02",&nbsp;W&nbsp;84°9'33.21"</td>
+  </tr>
+  <tr style="background-color: #f3f2f2;">
+    <td><b>Altitude</b></td>
+    <td>957&nbsp;m</td>
+  </tr>
+</table>
+</div>]]></description>
+      <styleUrl>#style2</styleUrl>
+      <Point>
+        <coordinates>-84.15922403,9.97361751,957</coordinates>
+      </Point>
+    </Placemark>
+  </Document>
+</kml>

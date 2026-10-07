@@ -24,7 +24,7 @@ from pathlib import Path
 try:
     import geopandas as gpd
     from shapely.geometry import Point, LineString
-    from shapely.ops import nearest_points
+    from shapely.ops import nearest_points, substring
 except ImportError:
     sys.exit("ERROR: instale geopandas: pip install geopandas")
 
@@ -52,6 +52,13 @@ MIN_SECTION_M       = 1.0    # seccion mas corta aceptada (m)
 CONNECT_ORPHAN_M    = 60.0   # max distancia para conectar huerfanos
 LATERAL_MAX_M       = 60.0   # max distancia tragante -> segmento
 MAX_ADVERSE_DROP_M  = -1.0   # caida hidraulica minima aceptada (negativo = sube; rechaza >1m de subida)
+# Un tramo que pasa a menos de esto de una caja de su PROPIA red sin
+# conectarla, se parte en esa caja para integrarla (el tubo real atraviesa
+# la caja; dejarlo de largo duplica el corredor y salta la caja). Pasa con
+# secciones cuya caja intermedia fue reclamada por otra linea guia, y con
+# rutas de gap-fill (la guia puede correr hasta ~6 m de la caja).
+SPLIT_NODE_TOL_M    = 6.5
+SPLIT_END_MARGIN_M  = 8.0    # cajas tan cerca del extremo no cuentan como "de paso"
 
 MIN_ELEV      = 900.0
 MAX_ELEV      = 1100.0
@@ -72,7 +79,12 @@ FORCED_FLOW = [
     ("crp_7", "crp_9"),
     ("crp_9", "crp_10"),
     ("crp_75", "crp_76"),   # el pluvial sigue la calle al NO (plano, 2026-07-14)
+    ("crp_52", "crp_53"),   # la calle baja al sur 52->53->58->desfogue_6; la
+                            # cota F/967 de crp_53 es un outlier (vecinos ~957-961)
     ("crp_19", "crp_20"),   # fondos casi planos (5 cm); el usuario confirma 19->20
+    ("crp_4", "crp_1"),     # el agua va al este hacia desfogue_7 (usuario);
+                            # el F/3.40 de crp_4 parece doble fondo
+    ("crp_x112", "crp_x110"),  # superficies identicas (955.36): fijar bajada
     # Corredor 41->42: los fondos reales caen 960.33 -> 960.05; las cotas
     # estimadas de los clones (superficie con loma en medio) partirian el
     # flujo en dos — el tubo real va enterrado bajo la loma.
@@ -80,17 +92,33 @@ FORCED_FLOW = [
     ("crp_x40", "crp_x41"),
     ("crp_x41", "crp_x42"),
     ("crp_x42", "crp_42"),
+    # La bajada 41 -> 40 -> x38 -> 27 (validada por el usuario hasta x38/27):
+    # el F/948.88 de crp_40 queda por DEBAJO del fondo estimado de crp_x38
+    # (prof 1.6 m, seguro mas somera que la real) — parece caida/doble fondo.
+    ("crp_40", "crp_x38"),
 ]
 
 # Cajas pluviales que existen en campo pero no estan en CRP actualizado:
 # se clonan de la posicion de la caja CRN del mismo pozo/esquina.
 # El id resultante es crp_x<numero> (p.ej. crn_115 -> crp_x115).
-CRP_DESDE_CRN = ["crn_115", "crn_40", "crn_41", "crn_42", "crn_38"]
+CRP_DESDE_CRN = ["crn_115", "crn_40", "crn_41", "crn_42", "crn_38",
+                 "crn_160", "crn_103",
+                 # bajada del hotel (crp_144) al desfogue_4 siguiendo los CRN
+                 "crn_114", "crn_113", "crn_112", "crn_110", "crn_111",
+                 "crn_109", "crn_108", "crn_107", "crn_106",
+                 # C.R. SELLADA S/963.17 sobre la calle MUNI (plano): existe
+                 # como caja pluvial pero solo estaba digitalizada como CRN.
+                 # Clonarla hace que crp_117 baje por la calle (117->x148->109)
+                 # en vez de la diagonal recta (usuario, 2026-07-16).
+                 "crn_148"]
 
 # Conexiones pluviales decididas por el usuario. Se enrutan por las lineas
 # guia si es posible; si no, tramo recto. El sentido lo dan las reglas.
 CONECTAR_DIRECTO = [
-    ("crp_x115", "crp_75"),
+    # Colector del rio: crp_x115 baja por la calle y ENTRA a crp_x106, que
+    # descarga al desfogue_4. (Antes iba directo a crp_75 pasando a 3 m del
+    # x106 sin conectarlo: corredor duplicado — usuario, 2026-07-15.)
+    ("crp_x115", "crp_x106"),
     ("crp_77", "crp_57"),      # el 77 drena via 57 (plano, 2026-07-14)
     ("crp_56", "desfogue_5"),  # seccion larga que los limites automaticos no tomaban
     ("crp_49", "crp_54"),      # seccion faltante (usuario, 2026-07-14): destapa
@@ -101,25 +129,75 @@ CONECTAR_DIRECTO = [
     ("crp_x40", "crp_x41"),
     ("crp_x41", "crp_x42"),
     ("crp_x42", "crp_42"),
-    # La calle que baja del sur pasa POR la rotonda (caja junto a crn_38)
-    ("crp_43", "crp_x38"),
-    ("crp_x38", "crp_38"),
+    # crp_43 sube a crp_38 por la calle de las "2 TUBERIAS paralelas de
+    # A.N. y Pluvial" del plano. La rotonda izquierda (crp_x38) NO va por
+    # la servidumbre: drena al oeste hacia crp_27 (colector Ø600).
+    ("crp_43", "crp_38"),
     ("crp_19", "crp_20"),      # seccion real (usuario); el 20-21 era invento
+    ("crp_81", "crp_79"),      # seccion faltante (usuario): destapa crp_81
+    # Servidumbre por las canchas de golf (plano): el pluvial baja de la
+    # zona PTAR/plaza por crp_59 hacia la calle de abajo
+    ("crp_60", "crp_59"),
+    ("crp_59", "crp_x160"),
+    ("crp_x160", "crp_x103"),
+    ("crp_51", "desfogue_6"),  # descarga de crp_51 (usuario): destapa el pozo
+    ("crp_35", "crp_34"),      # seccion faltante (usuario): destapa crp_35
+    ("crp_84", "crp_83"),      # seccion faltante (usuario)
+    # Bajada del hotel Cariari: crp_144 sigue los CRN hasta desfogue_4
+    ("crp_144", "crp_x114"),
+    ("crp_x114", "crp_x113"),
+    ("crp_x113", "crp_x112"),
+    ("crp_x112", "crp_x110"),
+    ("crp_x110", "crp_x111"),
+    ("crp_x111", "crp_x109"),
+    ("crp_x109", "crp_x108"),
+    ("crp_x108", "crp_x107"),
+    ("crp_x107", "crp_x106"),
+    ("crp_x106", "desfogue_4"),
+    ("crp_114", "crp_113"),    # seccion faltante (usuario): destapa crp_114
+    ("crp_125", "crp_118"),    # el 125 va al 118, no al 126 (usuario)
+    # Cadena real del cluster crp_109: 109 -> 107 -> 104 -> 106 (usuario
+    # veto 109->104 y 107->106; el 107 continua al 104, a 15 m y mas bajo)
+    ("crp_107", "crp_104"),
+    # Descargas al rio aprobadas 2026-07-15: reutiliza D9/D6 y conecta cada
+    # subred sin salida a su desfogue nuevo sobre el cauce.
+    ("crp_134", "desfogue_9"),   # reutiliza: D9 a 76 m
+    # desfogue_6 lo alimenta crp_58 (justo encima, a 77 m), no crp_52
+    # (crp_52 baja por la calle 52->53->58; usuario, 2026-07-16)
+    ("crp_58", "desfogue_6"),
+    ("crp_10", "desfogue_10"),   # troncal Los Arcos (128 nodos) al rio oeste
+    ("crp_101", "desfogue_11"),
+    ("crp_110", "desfogue_12"),
+    ("crp_137", "desfogue_13"),
+    ("crp_131", "desfogue_14"),
+    ("crp_90", "desfogue_15"),
+    ("crp_88", "desfogue_16"),
 ]
 
 # Pares que NUNCA deben conectarse (el gap-fill los inventaba).
-# crp_x115 existe solo para bajar a crp_75, y crp_75 continua a crp_76:
-# sin atajos automaticos a los desfogues del rio.
+# crp_x115 baja al crp_x106 (y de ahi al desfogue_4); crp_75 drena aparte
+# hacia crp_76: sin atajos automaticos a los desfogues del rio.
 NO_CONECTAR = [
     ("crp_75", "desfogue_4"),
+    ("crp_x115", "crp_75"),     # duplicaba el corredor hacia x106 (usuario, 2026-07-15)
     ("crp_x115", "desfogue_2"),
     ("crp_x115", "desfogue_4"),
     ("crp_77", "desfogue_5"),   # el 77 NO descarga directo: va via crp_57
     ("crp_146", "crp_42"),      # ese tramo no existe en campo (usuario)
     ("crp_41", "crp_42"),       # el corredor 41-42 va via crp_x40/x41/x42
     ("crp_42", "crp_136"),      # tampoco existe en campo (usuario, 2026-07-14)
-    ("crp_43", "crp_38"),       # el directo salta la rotonda: va via crp_x38
     ("crp_20", "crp_21"),       # no existe en campo: el 20 recibe del 19
+    ("crp_43", "crp_x38"),      # la diagonal entre rotondas cruzaba la manzana
+    ("crp_x38", "crp_38"),      # la servidumbre no lleva pluvial (usuario)
+    ("crp_x103", "desfogue_5"), # su agua va por la calle: crp_77 -> crp_57
+    ("crp_63", "crp_67"),       # no existe en campo (usuario, 2026-07-14)
+    ("crp_74", "crp_71"),       # diagonal cruzando la manzana (usuario)
+    ("crp_x106", "crp_75"),     # su agua va al desfogue_4 (a 6 m), no a crp_75
+    ("crp_109", "crp_106"),     # no existe en campo (usuario, 2026-07-14)
+    ("crp_125", "crp_126"),     # la diagonal no existe: va via crp_118 (usuario)
+    ("crp_109", "crp_104"),     # gap saltaba 92 m; el 109 va via crp_107 (usuario, 2026-07-16)
+    ("crp_107", "crp_106"),     # gap saltaba crp_104; el 107 va via 104 (usuario, 2026-07-16)
+    ("crp_58", "crp_57"),       # gap con caida de 21 m: el 58 descarga a desfogue_6, no al 57 (usuario, 2026-07-16)
 ]
 
 # Tragantes que NO deben generar lateral automatico (el mas cercano les
@@ -127,6 +205,26 @@ NO_CONECTAR = [
 TRAGANTES_SIN_LATERAL = {
     "tragante_39",   # su lateral de 56 m cruzaba la manzana hasta crp_17
 }
+
+# Desplazamientos de desfogues (dx, dy en metros CRTM05: +x=este, +y=norte).
+# Desfogues.shp trae los puntos levantados junto a la calle; el usuario los
+# corre para que la descarga caiga EN el rio. No se toca el shapefile fuente.
+MOVER_DESFOGUES = {
+    "desfogue_4": (-20.0, -20.0),   # 20 m al oeste y 20 m al sur (usuario, 2026-07-15)
+}
+
+# Desfogues adicionales a los 9 de Desfogues.shp (aprobados por el usuario,
+# 2026-07-15): puntos EXACTOS sobre el cauce (Cauce.shp) para descargar las
+# subredes sin salida grandes. Ids explicitos para que no se renumeren.
+DESFOGUES_EXTRA = [
+    ("desfogue_10", 481254.5, 1102417.1),   # rio oeste, recibe crp_10 (143 m)
+    ("desfogue_11", 482652.4, 1102186.8),   # quebrada sur, recibe crp_101 (33 m)
+    ("desfogue_12", 482917.3, 1102312.3),   # quebrada SE, recibe crp_110 (62 m)
+    ("desfogue_13", 483148.0, 1102688.9),   # Bermudez SE, recibe crp_137 (22 m)
+    ("desfogue_14", 483214.0, 1102572.0),   # Bermudez SE, recibe crp_131 (78 m)
+    ("desfogue_15", 482439.7, 1102118.3),   # quebrada sur, recibe crp_90 (57 m)
+    ("desfogue_16", 482121.5, 1102059.8),   # quebrada sur, recibe crp_88 (90 m)
+]
 _NO_CONECTAR_SET = {tuple(sorted(p)) for p in NO_CONECTAR}
 
 
@@ -229,8 +327,11 @@ def connect_directos(sections, node_by_id, backbone_lines):
         if na is None or nb is None:
             print(f"  AVISO: CONECTAR_DIRECTO no encontro {a_id} o {b_id}")
             continue
+        d_recta = math.hypot(na["x"] - nb["x"], na["y"] - nb["y"])
         routed = _route_via_line(na, nb, backbone_lines, tol=60.0)
-        if routed is not None:
+        # Guarda anti-rodeo: si la ruta por la guia es mucho mas larga que
+        # la distancia recta, la guia era otra calle — mejor tramo recto.
+        if routed is not None and routed[0].length <= max(d_recta * 3.0, d_recta + 50.0):
             geom, n_s, n_d = routed
             nuevos.append(_make_section(f"dir_{len(nuevos) + 1}", n_s, n_d, geom))
         else:
@@ -238,6 +339,69 @@ def connect_directos(sections, node_by_id, backbone_lines):
             nuevos.append(_make_section(f"dir_{len(nuevos) + 1}", na, nb, geom))
     print(f"  Conexiones directas: {len(nuevos)}")
     return nuevos
+
+
+def integrar_tramos_sobre_cajas(links, box_nodes, node_by_id, prefijos,
+                                tol=SPLIT_NODE_TOL_M):
+    """Parte los tramos que PASAN sobre una caja de su propia red sin
+    conectarla y la integra a la red. Ocurre cuando la caja intermedia fue
+    reclamada por otra linea guia (la seccion la salta) o cuando un directo
+    largo se dibujo antes de que existiera la caja. Las piezas que dupliquen
+    un tramo existente o esten en NO_CONECTAR se descartan."""
+    kind_por_red = {"pluvial": "crp", "residual": "crn"}
+    existentes = {tuple(sorted((lk["src_id"], lk["dst_id"]))) for lk in links}
+    out, divididos = [], 0
+    for lk in links:
+        if not lk["id"].startswith(prefijos):
+            out.append(lk)
+            continue
+        geom, kind = lk["geom"], kind_por_red.get(lk["red"])
+        sobre = []
+        for n in box_nodes:
+            if n["kind"] != kind or n["id"] in (lk["src_id"], lk["dst_id"]):
+                continue
+            p = Point(n["x"], n["y"])
+            if geom.distance(p) > tol:
+                continue
+            t = geom.project(p)
+            if SPLIT_END_MARGIN_M < t < geom.length - SPLIT_END_MARGIN_M:
+                sobre.append((t, n))
+        if not sobre:
+            out.append(lk)
+            continue
+        sobre.sort(key=lambda tn: tn[0])
+        filtrados = []
+        for t, n in sobre:
+            if not filtrados or t - filtrados[-1][0] >= 2.0:
+                filtrados.append((t, n))
+        print(f"  {lk['id']} ({lk['src_id']} -> {lk['dst_id']}) pasa sobre "
+              + ", ".join(n["id"] for _, n in filtrados) + ": se parte")
+        divididos += 1
+        path = ([(0.0, node_by_id[lk["src_id"]])] + filtrados
+                + [(geom.length, node_by_id[lk["dst_id"]])])
+        for i in range(len(path) - 1):
+            (t_a, n_a), (t_b, n_b) = path[i], path[i + 1]
+            par = tuple(sorted((n_a["id"], n_b["id"])))
+            if _par_prohibido(n_a["id"], n_b["id"]):
+                print(f"    pieza {n_a['id']} -> {n_b['id']}: descartada (NO_CONECTAR)")
+                continue
+            if par in existentes:
+                print(f"    pieza {n_a['id']} -> {n_b['id']}: descartada (ya existe)")
+                continue
+            sub = substring(geom, t_a, t_b)
+            coords = list(sub.coords)
+            coords[0]  = (n_a["x"], n_a["y"])
+            coords[-1] = (n_b["x"], n_b["y"])
+            pieza = LineString(coords)
+            if pieza.length < MIN_SECTION_M:
+                continue
+            out.append(_make_section(f"{lk['id']}s{i + 1}", n_a, n_b, pieza))
+            existentes.add(par)
+    if divididos:
+        print(f"  Tramos partidos sobre cajas propias: {divididos}")
+    else:
+        print("  Ningun tramo pasa sobre cajas propias.")
+    return out
 
 
 def load_desfogues():
@@ -259,6 +423,24 @@ def load_desfogues():
             "kind":           "desfogue",
             "x":              float(geom.x),
             "y":              float(geom.y),
+            "sup_elev":       None,
+            "fon_elev":       None,
+            "prof_m":         DEFAULT_DEPTH["desfogue"],
+            "prof_src":       "estimado",
+            "hydraulic_elev": None,
+        })
+    for n in nodes:
+        dx, dy = MOVER_DESFOGUES.get(n["id"], (0.0, 0.0))
+        if dx or dy:
+            n["x"] += dx
+            n["y"] += dy
+            print(f"  {n['id']} desplazado ({dx:+.0f}, {dy:+.0f}) m")
+    for did, x, y in DESFOGUES_EXTRA:
+        nodes.append({
+            "id":             did,
+            "kind":           "desfogue",
+            "x":              x,
+            "y":              y,
             "sup_elev":       None,
             "fon_elev":       None,
             "prof_m":         DEFAULT_DEPTH["desfogue"],
@@ -1046,6 +1228,10 @@ def main():
     print("\n[3b] Conexiones directas decididas por el usuario ...")
     sections += connect_directos(sections, node_by_id, backbone)
 
+    print("\n[3c] Integrando cajas propias bajo secciones y tramos directos ...")
+    sections = integrar_tramos_sobre_cajas(sections, box_nodes, node_by_id,
+                                           ("sec_", "dir_"))
+
     print("\n[4] Conectando nodos huerfanos ...")
     orphan_links = connect_orphan_nodes(sections, box_nodes, node_by_id, backbone)
 
@@ -1053,6 +1239,10 @@ def main():
     gap_links = connect_same_type_gaps(sections + orphan_links, box_nodes, backbone)
 
     all_sections = sections + orphan_links + gap_links
+
+    print("\n[4b1] Integrando cajas propias bajo tramos automaticos ...")
+    all_sections = integrar_tramos_sobre_cajas(all_sections, box_nodes, node_by_id,
+                                               ("gap_", "orph_"))
 
     # Triangulos: si A y B ya drenan al mismo punto (p.ej. ambos a un
     # desfogue) y ademas existe un tramo automatico A-B, ese tramo es
@@ -1159,6 +1349,34 @@ def main():
             node_by_id[dst_id]["sup_elev"] = round(lk["dst_elev"] + node_by_id[dst_id]["prof_m"], 3)
             node_by_id[dst_id]["hydraulic_elev"] = lk["dst_elev"]
 
+    # Un desfogue debe ser el punto MAS BAJO de sus tramos. La cota por
+    # vecindario (120 m) puede quedar alta si el nodo que le aporta esta mas
+    # lejos que el radio (p.ej. desfogue_10, con crp_10 a 143 m): se baja a
+    # (minimo de los aportes - DESFOGUE_DROP_M) y se recalculan los drops.
+    print("\n[5b2] Desfogues por debajo de sus aportes ...")
+    aportes = {}
+    for lk in all_links:
+        if lk["dst_kind"] == "desfogue" and lk["src_elev"] is not None:
+            aportes.setdefault(lk["dst_id"], []).append(lk["src_elev"])
+    ajustados = 0
+    for did, elevs in aportes.items():
+        n_d = node_by_id[did]
+        piso = round(min(elevs) - DESFOGUE_DROP_M, 3)
+        if n_d["fon_elev"] is None or n_d["fon_elev"] > piso:
+            print(f"  {did}: cota {n_d['fon_elev']} -> {piso}")
+            n_d["fon_elev"] = piso
+            n_d["hydraulic_elev"] = piso
+            n_d["sup_elev"] = round(piso + n_d["prof_m"], 3)
+            ajustados += 1
+    if ajustados:
+        for lk in all_links:
+            if lk["dst_kind"] == "desfogue":
+                lk["dst_elev"] = node_by_id[lk["dst_id"]]["fon_elev"]
+                if lk["src_elev"] is not None:
+                    lk["drop_m"] = round(lk["src_elev"] - lk["dst_elev"], 3)
+    else:
+        print("  Todos los desfogues ya estan por debajo de sus aportes.")
+
     # Verificacion final de sentido: con las cotas ya completas, ningun tramo
     # (salvo laterales de tragante, que son topologicos) debe "subir".
     # Los pares de FORCED_FLOW se imponen tal cual (conocimiento de campo).
@@ -1193,6 +1411,38 @@ def main():
             _flip_link(lk)
             flipped += 1
     print(f"  Tramos re-orientados: {flipped} (sentidos forzados aplicados: {n_forced}/{len(forced)})")
+
+    # Dos tramos troncales de la misma red corriendo paralelos (<3 m) por mas
+    # de 30 m suelen ser el mismo tubo digitalizado dos veces. Solo avisa: la
+    # correccion la decide el usuario (NO_CONECTAR / CONECTAR_DIRECTO).
+    print("\n[5d] Control de corredores duplicados ...")
+    troncales = [lk for lk in all_links if not lk["id"].startswith("lat_")]
+    bounds = [lk["geom"].bounds for lk in troncales]
+    avisos = 0
+    for i, a in enumerate(troncales):
+        ax0, ay0, ax1, ay1 = bounds[i]
+        for j in range(i + 1, len(troncales)):
+            b = troncales[j]
+            if a["red"] != b["red"]:
+                continue
+            bx0, by0, bx1, by1 = bounds[j]
+            if bx0 > ax1 + 3 or bx1 < ax0 - 3 or by0 > ay1 + 3 or by1 < ay0 - 3:
+                continue
+            ga, gb = a["geom"], b["geom"]
+            comun = {a["src_id"], a["dst_id"]} & {b["src_id"], b["dst_id"]}
+            for nid in comun:
+                n = node_by_id[nid]
+                mask = Point(n["x"], n["y"]).buffer(20.0)
+                ga, gb = ga.difference(mask), gb.difference(mask)
+            if ga.is_empty or gb.is_empty:
+                continue
+            solape = gb.intersection(ga.buffer(3.0)).length
+            if solape > 30.0:
+                print(f"  AVISO: {a['id']} ({a['src_id']} -> {a['dst_id']}) y {b['id']} "
+                      f"({b['src_id']} -> {b['dst_id']}) comparten {solape:.0f} m de corredor")
+                avisos += 1
+    if not avisos:
+        print("  Sin corredores duplicados.")
 
     pluvial_links  = [lk for lk in all_links if lk["red"] == "pluvial"]
     residual_links = [lk for lk in all_links if lk["red"] == "residual"]
