@@ -1,0 +1,24 @@
+{
+  "fecha": "2026-10-13",
+  "decision": "Conservar el sitio antes denominado SBN-S/I y asignar id 10 por confirmación del autor.",
+  "sitios": 16,
+  "conteos": {
+    "jardin": 3,
+    "pozo": 5,
+    "cemento_permeable": 7,
+    "zanja": 1
+  },
+  "capa": "Area para SBN",
+  "registro_dbf_base_1": 13,
+  "cambios": "Solo identificador; se conservan geometría, dimensiones y cálculos. PDF cartográfico: sustitución vectorial de etiqueta y exportación PNG a 300 ppp. Script ajustado para usar el id corregido y rechazar identificadores vacíos.",
+  "sha256": {
+    "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Area para SBN/Area para SBN.shp": "4a6bd523274227730a25b8aa28efed0d4a8c2bb867bbba7a2f25304df2ca5781",
+    "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Area para SBN/Area para SBN.dbf": "047521982b9caf0133a291fb303d0f777b607d9e0dc010611c3f01f6bd3d0e3b",
+    "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Area para SBN/Area para SBN.shx": "05cfab62365418881c9488b42613baf12ffdd606be0e3afb455d7b527dfddc52",
+    "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Area para SBN/Area para SBN.cpg": "3ad3031f5503a4404af825262ee8232cc04d4ea6683d42c5dd0a2f2a27ac9824",
+    "Arcgis shapes y curvas/Shapes Tragantes y alcantarillado/Area para SBN/Area para SBN.prj": "a02a27b1d1982c8516d83398e85a3c8b1aef1713c13ef4d84d7bde17430c07c4",
+    "figuras_corregidas/scripts/mapas_15_33_48.py": "f4217c6289bf9f9477d2a96fd2e17db8284c954bfe65eba87a9e3bb3fb159a47",
+    "figuras_corregidas/mapas/figura_48_ubicacion_SbN.pdf": "5085812f2c4d0063405ccfd297062267d2fa971bf19777821024230d93dad135",
+    "figuras_corregidas/mapas/figura_48_ubicacion_SbN.png": "a7b74d7168ba950bd8d06633b58ccfec57a18212fc7468dd43ff325aca9616ed"
+  }
+}

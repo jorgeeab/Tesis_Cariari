@@ -169,15 +169,16 @@ def figura_48(salida: Path) -> None:
         grupo.plot(ax=ax, color=color, marker=marcador, edgecolor=color,
                    alpha=0.85, markersize=28, zorder=8)
         for fila in grupo.itertuples():
-            sin_id = math.isnan(fila.id)
-            codigo = "SBN-S/I" if sin_id else f"SBN-{int(fila.id):02d}"
+            if math.isnan(fila.id):
+                raise ValueError("Todos los sitios SbN deben tener un identificador en la capa SIG")
+            codigo = f"SBN-{int(fila.id):02d}"
             p = fila.geometry.representative_point()
             offsets = {
                 2: (0, 18), 3: (-5, -24), 4: (-4, 10), 5: (5, 18),
-                6: (0, 27), 7: (-12, 10), 9: (-2, -20), 11: (0, -30),
+                6: (0, 27), 7: (-12, 10), 9: (-2, -20), 10: (0, -20), 11: (0, -30),
                 12: (-12, -20), 13: (-10, -11), 14: (8, -30), 15: (10, -12),
             }
-            despl = (0, -20) if sin_id else offsets.get(int(fila.id), (0, 8))
+            despl = offsets.get(int(fila.id), (0, 8))
             ax.annotate(codigo, (p.x, p.y), xytext=despl,
                         textcoords="offset points", ha="center", va="center",
                         fontsize=5.5, fontweight="bold", color="#202124",
@@ -247,3 +248,4 @@ if __name__ == "__main__":
     parser.add_argument("--output-root", type=Path,
                         default=REPO / "figuras_corregidas")
     generar(parser.parse_args().output_root.resolve())
+
