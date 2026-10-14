@@ -1,0 +1,18 @@
+{
+ "fuente": "Arcgis shapes y curvas\\G-08 SANITARIO OESTE.pdf",
+ "archivo": "figura_34_detalle_levantamiento_G08",
+ "ancho_cm": 15.9,
+ "alto_cm": 12.32,
+ "png_px": [
+  1878,
+  1455
+ ],
+ "ppp": 300,
+ "clip_pt": [
+  1108.8,
+  734.4,
+  2059.2,
+  1468.8
+ ],
+ "factor_respecto_lamina": 0.47
+}

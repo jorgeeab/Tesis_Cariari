@@ -1,0 +1,149 @@
+{
+ "script": "C:\\Users\\jorge\\Documents\\Antigravity Proyects\\Tesis_Cariari\\figuras_corregidas\\scripts\\mapas_15_33_48.py",
+ "fecha": "2026-10-06T22:09:52",
+ "commit_repositorio": "cab0285",
+ "python": "3.11.0",
+ "matplotlib": "3.11.0",
+ "geopandas": "1.1.3",
+ "entradas": {
+  "output\\shapefiles_v7\\red_pluvial_nodos.shp": "7ecefa4c8f07c60d0951350a0bea57ee",
+  "output\\shapefiles_v7\\red_pluvial_links.shp": "5269708ee8089ae72975ba1e8050cb57",
+  "output\\shapefiles_v7\\red_pluvial_flechas.shp": "9f06324d8ac7e63bb504e2494ec3dde8",
+  "output\\microcuencas\\microcuencas_desfogue.shp": "12ba4f7594d3c9efa3d0ca26e9138142",
+  "Arcgis shapes y curvas\\Cauce.shp": "da3c4f4e664a3516c7661a6ae6935971",
+  "Arcgis shapes y curvas\\Desfogues.shp": "0f2763390c2a48c8caf94681b48b1890",
+  "Arcgis shapes y curvas\\Shapes Tragantes y alcantarillado\\Alcantarillado.shp": "d7bbe353cedf2e6678b8e795db3d0dcb",
+  "Arcgis shapes y curvas\\Shapes Tragantes y alcantarillado\\Tragantes (2).shp": "74a0fc29cc2e7f32d951ac7879f567c8",
+  "Arcgis shapes y curvas\\Shapes Tragantes y alcantarillado\\CRP actualizado\\CRP actualizado.shp": "4c9f67c790733ef1e1fd4770f2da29e4",
+  "Arcgis shapes y curvas\\Shapes Tragantes y alcantarillado\\CRN (2).shp": "eb16da8847a93b4a923a3cfed0b9ac9c",
+  "Arcgis shapes y curvas\\Shapes Tragantes y alcantarillado\\Area para SBN\\Area para SBN.shp": "87e803dda7e3bb8a96354ffa7f95322d",
+  "Arcgis shapes y curvas\\Shapes Tragantes y alcantarillado\\area de estudio.shp": "d8f33f26e57a0250c9fc6d8df86fa4d6",
+  "resultados_refinados\\_cache_curvas_clipped\\intermedia_clipped.json": "6a06f1ea7be51543fd093c0792d52e03"
+ },
+ "salidas": [
+  {
+   "archivo": "mapas/figura_33_capas_fuente",
+   "ancho_cm": 15.9,
+   "alto_cm": 13.45,
+   "png_px": [
+    1878,
+    1589
+   ],
+   "ppp": 300
+  },
+  {
+   "archivo": "mapas/figura_48_ubicacion_SbN",
+   "ancho_cm": 15.9,
+   "alto_cm": 17.63,
+   "png_px": [
+    1878,
+    2082
+   ],
+   "ppp": 300
+  },
+  {
+   "archivo": "mapas/figura_15_microcuencas",
+   "ancho_cm": 15.9,
+   "alto_cm": 13.66,
+   "png_px": [
+    1878,
+    1614
+   ],
+   "ppp": 300
+  }
+ ],
+ "conteos_figura_33": {
+  "curvas": 23,
+  "tragantes": 254,
+  "crp": 277,
+  "crn": 193,
+  "desfogues": 9,
+  "trazos_guia": 42
+ },
+ "conteos_figura_48": {
+  "sitios": 16,
+  "cemento": 7,
+  "pozo": 5,
+  "jardin": 3,
+  "zanja": 1
+ },
+ "microcuencas": [
+  {
+   "desfogue": "desfogue_7",
+   "rio": "Bermudez",
+   "n_trag": 84,
+   "area_ha": 46.6,
+   "codigo": "MC-B1"
+  },
+  {
+   "desfogue": "desfogue_5",
+   "rio": "Bermudez",
+   "n_trag": 56,
+   "area_ha": 54.91,
+   "codigo": "MC-B2"
+  },
+  {
+   "desfogue": "desfogue_4",
+   "rio": "Bermudez",
+   "n_trag": 17,
+   "area_ha": 28.1,
+   "codigo": "MC-B3"
+  },
+  {
+   "desfogue": "desfogue_14",
+   "rio": "Bermudez",
+   "n_trag": 17,
+   "area_ha": 22.46,
+   "codigo": "MC-B4"
+  },
+  {
+   "desfogue": "desfogue_13",
+   "rio": "Bermudez",
+   "n_trag": 15,
+   "area_ha": 11.5,
+   "codigo": "MC-B5"
+  },
+  {
+   "desfogue": "desfogue_10",
+   "rio": "Virilla",
+   "n_trag": 23,
+   "area_ha": 13.62,
+   "codigo": "MC-V1"
+  },
+  {
+   "desfogue": "desfogue_9",
+   "rio": "Virilla",
+   "n_trag": 9,
+   "area_ha": 8.65,
+   "codigo": "MC-V2"
+  },
+  {
+   "desfogue": "desfogue_16",
+   "rio": "Virilla",
+   "n_trag": 9,
+   "area_ha": 7.52,
+   "codigo": "MC-V3"
+  },
+  {
+   "desfogue": "desfogue_15",
+   "rio": "Virilla",
+   "n_trag": 7,
+   "area_ha": 9.33,
+   "codigo": "MC-V4"
+  },
+  {
+   "desfogue": "desfogue_11",
+   "rio": "Virilla",
+   "n_trag": 15,
+   "area_ha": 10.53,
+   "codigo": "MC-V5"
+  },
+  {
+   "desfogue": "desfogue_12",
+   "rio": "Virilla",
+   "n_trag": 2,
+   "area_ha": 5.41,
+   "codigo": "MC-V6"
+  }
+ ]
+}

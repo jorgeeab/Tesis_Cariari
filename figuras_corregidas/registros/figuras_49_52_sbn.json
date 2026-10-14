@@ -1,0 +1,64 @@
+{
+  "script": "C:\\Users\\jorge\\Documents\\Antigravity Proyects\\Tesis_Cariari\\scripts\\generar_figuras_536.py",
+  "fecha": "2026-10-13T19:06:55",
+  "commit_repositorio": "cab0285",
+  "python": "3.11.0",
+  "matplotlib": "3.11.0",
+  "figuras": [
+    49,
+    50,
+    51,
+    52
+  ],
+  "criterio": "Regeneracion a 300 ppp y PDF vectorial; rotulos con coma decimal.",
+  "salidas": [
+    {
+      "archivo": "figuras_49_52_sbn/figura_49_jardin_lluvia",
+      "png_px": [
+        3000,
+        2880
+      ],
+      "ancho_cm_a_300_ppp": 25.4,
+      "alto_cm_a_300_ppp": 24.38,
+      "ppp": 300,
+      "md5_png": "9fd73a4299d693ede179f41dc6077d18",
+      "md5_pdf": "4e26587bb67ddf7810553b0ec6a369da"
+    },
+    {
+      "archivo": "figuras_49_52_sbn/figura_50_pozo_infiltracion",
+      "png_px": [
+        3300,
+        1680
+      ],
+      "ancho_cm_a_300_ppp": 27.94,
+      "alto_cm_a_300_ppp": 14.22,
+      "ppp": 300,
+      "md5_png": "7c4aa669c94b971cf6a49c479d88245a",
+      "md5_pdf": "557076dff412634ae48fdc2592e51e83"
+    },
+    {
+      "archivo": "figuras_49_52_sbn/figura_51_cemento_permeable",
+      "png_px": [
+        3000,
+        1680
+      ],
+      "ancho_cm_a_300_ppp": 25.4,
+      "alto_cm_a_300_ppp": 14.22,
+      "ppp": 300,
+      "md5_png": "74c83f134fc348cfc38807488a5ab1ed",
+      "md5_pdf": "b3a8abb6f41c8a76803ffb5ddfbf3020"
+    },
+    {
+      "archivo": "figuras_49_52_sbn/figura_52_zanja_infiltrante",
+      "png_px": [
+        3300,
+        2760
+      ],
+      "ancho_cm_a_300_ppp": 27.94,
+      "alto_cm_a_300_ppp": 23.37,
+      "ppp": 300,
+      "md5_png": "bcde303a764305f77fde3e65eb2f357d",
+      "md5_pdf": "cb91b17dea624d56ab6c9c02ff8d368e"
+    }
+  ]
+}

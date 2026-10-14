@@ -1,0 +1,38 @@
+{
+ "script": "C:\\Users\\jorge\\Documents\\Antigravity Proyects\\Tesis_Cariari\\figuras_corregidas\\scripts\\figura_40_hietogramas.py",
+ "fecha": "2026-10-06T22:06:59",
+ "commit_repositorio": "cab0285",
+ "python": "3.11.0",
+ "matplotlib": "3.11.0",
+ "geopandas": "1.1.3",
+ "entradas": {
+  "results\\simulaciones\\evento_real_2016-06-14\\hietograma.csv": "2fee456b53eb47b8cb046322a3c0c7bf",
+  "results\\simulaciones\\diseno_T10_santa_lucia\\hietograma.csv": "72c7d0368243be89f6fe492c080bb972",
+  "results\\simulaciones\\evento_real_2016-06-14\\resumen.json": "b01f085ee72f7c3ffe0c1e7ac5e5ffa0",
+  "results\\simulaciones\\diseno_T10_santa_lucia\\resumen.json": "58ff8e63fdf93c116340a07ce1c0e3a5"
+ },
+ "salidas": [
+  {
+   "archivo": "figura_40/figura_40_hietogramas",
+   "ancho_cm": 15.9,
+   "alto_cm": 6.8,
+   "png_px": [
+    1878,
+    803
+   ],
+   "ppp": 300
+  }
+ ],
+ "verificacion": {
+  "evento_real_2016-06-14": {
+   "total_mm": 120.2,
+   "pico_mm_h": 23.5,
+   "paso_min": 60.0
+  },
+  "diseno_T10_santa_lucia": {
+   "total_mm": 82.86,
+   "pico_mm_h": 245.0,
+   "paso_min": 5.0
+  }
+ }
+}

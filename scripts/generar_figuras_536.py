@@ -6,11 +6,17 @@ preliminares (planta / perfil / sección con capas constructivas, entrada,
 salida, rebalse, vegetación y drenaje inferior) con las dimensiones del
 dimensionamiento preliminar de la sección 5.3.5.
 
-Salida: Documentos Tesis/figuras_mapa3d/fig_536_*.png
+Salidas:
+- Documentos Tesis/figuras_mapa3d/fig_536_*.png
+- figuras_corregidas/figuras_49_52_sbn/figura_*.png|pdf
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -21,6 +27,12 @@ from matplotlib.patches import Circle, FancyArrow, Polygon, Rectangle
 
 BASE = Path(__file__).resolve().parent.parent
 OUT = BASE / "Documentos Tesis" / "figuras_mapa3d"
+OUT_CORR = BASE / "figuras_corregidas" / "figuras_49_52_sbn"
+REG_DIR = BASE / "figuras_corregidas" / "registros"
+for _dir in (OUT, OUT_CORR, REG_DIR):
+    _dir.mkdir(parents=True, exist_ok=True)
+DPI_ENTREGA = 300
+SALIDAS_REGISTRO: list[dict[str, object]] = []
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -87,6 +99,61 @@ def preparar(ax, xlim, ylim, titulo):
     ax.set_aspect("equal")
     ax.axis("off")
     ax.set_title(titulo, fontsize=11, color=TINTA, pad=8)
+
+
+def _md5(path: Path) -> str:
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def guardar(fig, nombre_base: str, nombre_corregido: str | None = None) -> None:
+    legacy = OUT / f"{nombre_base}.png"
+    fig.savefig(legacy, facecolor="white", dpi=DPI_ENTREGA)
+    if nombre_corregido is None:
+        return
+
+    png = OUT_CORR / f"{nombre_corregido}.png"
+    pdf = OUT_CORR / f"{nombre_corregido}.pdf"
+    fig.savefig(png, facecolor="white", dpi=DPI_ENTREGA)
+    fig.savefig(pdf, facecolor="white")
+    ancho_in, alto_in = fig.get_size_inches()
+    SALIDAS_REGISTRO.append({
+        "archivo": f"figuras_49_52_sbn/{nombre_corregido}",
+        "png_px": [round(ancho_in * DPI_ENTREGA), round(alto_in * DPI_ENTREGA)],
+        "ancho_cm_a_300_ppp": round(ancho_in * 2.54, 2),
+        "alto_cm_a_300_ppp": round(alto_in * 2.54, 2),
+        "ppp": DPI_ENTREGA,
+        "md5_png": _md5(png),
+        "md5_pdf": _md5(pdf),
+    })
+
+
+def escribir_registro() -> None:
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=BASE,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        commit = "desconocido"
+    registro = {
+        "script": str(Path(__file__).resolve()),
+        "fecha": datetime.now().isoformat(timespec="seconds"),
+        "commit_repositorio": commit,
+        "python": sys.version.split()[0],
+        "matplotlib": matplotlib.__version__,
+        "figuras": [49, 50, 51, 52],
+        "criterio": "Regeneracion a 300 ppp y PDF vectorial; rotulos con coma decimal.",
+        "salidas": SALIDAS_REGISTRO,
+    }
+    path = REG_DIR / "figuras_49_52_sbn.json"
+    path.write_text(json.dumps(registro, indent=2, ensure_ascii=False), encoding="utf-8")
+    print("registro:", path)
 
 
 # ── F1: plano de ubicación ──────────────────────────────────────────
@@ -165,7 +232,7 @@ def fig_ubicacion():
     ax.set_title("Ubicación de los sitios propuestos para SbN — Bosques de Doña Rosa, Belén",
                  fontsize=12, color=TINTA, pad=12)
     fig.tight_layout()
-    fig.savefig(OUT / "fig_536_ubicacion.png", facecolor="white")
+    guardar(fig, "fig_536_ubicacion")
     plt.close(fig)
     print("ubicacion lista")
 
@@ -224,7 +291,7 @@ def fig_jardin():
     asx.text(4.15, 0.46, "borde libre", fontsize=7.5, color=SUAVE, ha="center", bbox=CAJA_TXT)
     dim_v(asx, -0.95, -1.15, 0.32, "prof. constructiva ≈ 0,45–0,60 m", offset=-0.55, fs=8)
     fig.tight_layout()
-    fig.savefig(OUT / "fig_536_jardin.png", facecolor="white")
+    guardar(fig, "fig_536_jardin", "figura_49_jardin_lluvia")
     plt.close(fig)
     print("jardin listo")
 
@@ -269,7 +336,7 @@ def fig_pozo():
     dim_v(asx, 2.6, -2.5, 0, "2,0–2,5 m", offset=0.06)
     dim_h(asx, 0, 2, 0.35, "2,00 m", offset=0.05)
     fig.tight_layout()
-    fig.savefig(OUT / "fig_536_pozo.png", facecolor="white")
+    guardar(fig, "fig_536_pozo", "figura_50_pozo_infiltracion")
     plt.close(fig)
     print("pozo listo")
 
@@ -331,7 +398,7 @@ def fig_pavimento():
     asx.text(3.0, -2.4, "pendiente transversal ≤ 2 %; sin entrada de sedimentos finos durante la obra",
              fontsize=8, color=SUAVE, ha="center")
     fig.tight_layout()
-    fig.savefig(OUT / "fig_536_pavimento.png", facecolor="white")
+    guardar(fig, "fig_536_pavimento", "figura_51_cemento_permeable")
     plt.close(fig)
     print("pavimento listo")
 
@@ -393,7 +460,7 @@ def fig_zanja():
     dim_v(asx, 3.1, -prof, 0, "0,45 m (útil)", offset=0.06, fs=8.5)
     asx.text(1.1, -1.4, "grava limpia (porosidad ≈ 0,35) con capa filtrante superior", fontsize=8.5,
              color="#3c4148", ha="center")
-    fig.savefig(OUT / "fig_536_zanja.png", facecolor="white")
+    guardar(fig, "fig_536_zanja", "figura_52_zanja_infiltrante")
     plt.close(fig)
     print("zanja lista")
 
@@ -404,4 +471,5 @@ if __name__ == "__main__":
     fig_pozo()
     fig_pavimento()
     fig_zanja()
+    escribir_registro()
     print("figuras 5.3.6 en", OUT)

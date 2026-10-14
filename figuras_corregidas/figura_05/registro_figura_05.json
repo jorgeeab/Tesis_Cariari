@@ -1,0 +1,133 @@
+{
+ "fuente": "Arcgis shapes y curvas\\G-08 SANITARIO OESTE.pdf",
+ "metadatos_fuente": {
+  "format": "PDF 1.5",
+  "title": "C:\\Users\\PRINCIPAL\\Desktop\\Informe Final Fase I\\DVD\\Apéndice 11 - Planos\\Planos Finales AutoCAD VC\\G-08-09 SANITARIO Layout1 (1",
+  "author": "PRINCIPAL",
+  "subject": "",
+  "keywords": "",
+  "creator": "PScript5.dll Version 5.2.2",
+  "producer": "Acrobat Distiller 9.0.0 (Windows)",
+  "creationDate": "D:20110525171946-06'00'",
+  "modDate": "D:20110525172103-06'00'",
+  "trapped": "",
+  "encryption": null
+ },
+ "zonas_pt": {
+  "marco_mapa": [
+   150.0,
+   230.0,
+   2275.0,
+   2215.0
+  ],
+  "simbologia": [
+   2458.0,
+   880.0,
+   2824.0,
+   1674.0
+  ],
+  "cajetin": [
+   2812.0,
+   224.0,
+   3019.0,
+   760.0
+  ],
+  "ubicacion": [
+   2416.0,
+   1730.0,
+   2854.0,
+   2095.0
+  ],
+  "detalle_A": [
+   150.0,
+   230.0,
+   1265.6,
+   1272.1
+  ],
+  "detalle_B": [
+   1159.4,
+   230.0,
+   2275.0,
+   1272.1
+  ],
+  "detalle_C": [
+   150.0,
+   1172.9,
+   1265.6,
+   2215.0
+  ],
+  "detalle_D": [
+   1159.4,
+   1172.9,
+   2275.0,
+   2215.0
+  ]
+ },
+ "salidas": [
+  {
+   "archivo": "figura_05a_vista_general",
+   "ancho_cm": 15.9,
+   "alto_cm": 14.86,
+   "png_px": [
+    1878,
+    1756
+   ],
+   "ppp": 300
+  },
+  {
+   "archivo": "figura_05b_simbologia_cajetin",
+   "ancho_cm": 15.9,
+   "alto_cm": 17.77,
+   "png_px": [
+    1878,
+    2099
+   ],
+   "ppp": 300
+  },
+  {
+   "archivo": "figura_05c_detalle_A",
+   "ancho_cm": 15.9,
+   "alto_cm": 14.86,
+   "png_px": [
+    1878,
+    1756
+   ],
+   "ppp": 300,
+   "factor_respecto_lamina": 0.4
+  },
+  {
+   "archivo": "figura_05d_detalle_B",
+   "ancho_cm": 15.9,
+   "alto_cm": 14.86,
+   "png_px": [
+    1878,
+    1756
+   ],
+   "ppp": 300,
+   "factor_respecto_lamina": 0.4
+  },
+  {
+   "archivo": "figura_05e_detalle_C",
+   "ancho_cm": 15.9,
+   "alto_cm": 14.86,
+   "png_px": [
+    1878,
+    1756
+   ],
+   "ppp": 300,
+   "factor_respecto_lamina": 0.4
+  },
+  {
+   "archivo": "figura_05f_detalle_D",
+   "ancho_cm": 15.9,
+   "alto_cm": 14.86,
+   "png_px": [
+    1878,
+    1756
+   ],
+   "ppp": 300,
+   "factor_respecto_lamina": 0.4
+  }
+ ],
+ "escala_panel_b": 0.546
+}
